@@ -1,6 +1,6 @@
-# 🚀 Crawl4AI Interactive Apps
+# 🚀 Crawl4AI Interaktive Apps
 
-Welcome to the Crawl4AI Apps Hub - your gateway to interactive tools and demos that make web scraping more intuitive and powerful.
+Willkommen im Crawl4AI Apps Hub - Ihr Tor zu interaktiven Werkzeugen und Demos, die Web-Scraping intuitiver und leistungsfähiger machen.
 
 <style>
 .apps-container {
@@ -140,163 +140,159 @@ Welcome to the Crawl4AI Apps Hub - your gateway to interactive tools and demos t
 </style>
 
 <div class="intro-section">
-<h2>🛠️ Interactive Tools for Modern Web Scraping</h2>
+<h2>🛠️ Interaktive Werkzeuge für modernes Web-Scraping</h2>
 <p>
-Our apps are designed to make Crawl4AI more accessible and powerful. Whether you're learning browser automation, designing extraction strategies, or building complex scrapers, these tools provide visual, interactive ways to work with Crawl4AI's features.
+Unsere Apps sind darauf ausgelegt, Crawl4AI zugänglicher und leistungsfähiger zu machen. Ob Sie Browser-Automatisierung lernen, Extraktionsstrategien entwerfen oder komplexe Scraper erstellen - diese Werkzeuge bieten visuelle, interaktive Wege, mit Crawl4AIs Funktionen zu arbeiten.
 </p>
 </div>
 
-## 🎯 Available Apps
+## 🎯 Verfügbare Apps
 
 <div class="apps-container">
 
 <div class="app-card">
-    <span class="app-status status-available">Available</span>
-    <h3>🎨 C4A-Script Interactive Editor</h3>
+    <span class="app-status status-available">Verfügbar</span>
+    <h3>🎨 C4A-Script Interaktiver Editor</h3>
     <p class="app-description">
-        A visual, block-based programming environment for creating browser automation scripts. Perfect for beginners and experts alike!
+        Eine visuelle, blockbasierte Programmierumgebung zum Erstellen von Browser-Automatisierungsskripten. Perfekt für Anfänger und Experten gleichermaßen!
     </p>
     <ul class="app-features">
-        <li>Drag-and-drop visual programming</li>
-        <li>Real-time JavaScript generation</li>
-        <li>Interactive tutorials</li>
-        <li>Export to C4A-Script or JavaScript</li>
-        <li>Live preview capabilities</li>
+        <li>Drag-and-Drop visuelle Programmierung</li>
+        <li>Echtzeit-JavaScript-Generierung</li>
+        <li>Interaktive Tutorials</li>
+        <li>Export zu C4A-Script oder JavaScript</li>
+        <li>Live-Vorschau-Funktionen</li>
     </ul>
     <div class="app-action">
-        <a href="c4a-script/" class="app-btn" target="_blank">Launch Editor →</a>
+        <a href="c4a-script/" class="app-btn" target="_blank">Editor starten →</a>
     </div>
 </div>
 
 <div class="app-card">
-    <span class="app-status status-available">Available</span>
-    <h3>🧠 LLM Context Builder</h3>
+    <span class="app-status status-available">Verfügbar</span>
+    <h3>🧠 LLM-Kontext-Ersteller</h3>
     <p class="app-description">
-        Generate optimized context files for your favorite LLM when working with Crawl4AI. Get focused, relevant documentation based on your needs.
+        Generieren Sie optimierte Kontextdateien für Ihr bevorzugtes LLM bei der Arbeit mit Crawl4AI. Erhalten Sie fokussierte, relevante Dokumentation basierend auf Ihren Bedürfnissen.
     </p>
     <ul class="app-features">
-        <li>Modular context generation</li>
-        <li>Memory, reasoning & examples perspectives</li>
-        <li>Component-based selection</li>
-        <li>Vibe coding preset</li>
-        <li>Download custom contexts</li>
+        <li>Modulare Kontextgenerierung</li>
+        <li>Speicher-, Logik- & Beispiel-Perspektiven</li>
+        <li>Komponentenbasierte Auswahl</li>
+        <li>Vibe-Coding-Voreinstellung</li>
+        <li>Benutzerdefinierte Kontexte herunterladen</li>
     </ul>
     <div class="app-action">
-        <a href="llmtxt/" class="app-btn" target="_blank">Launch Builder →</a>
+        <a href="llmtxt/" class="app-btn" target="_blank">Ersteller starten →</a>
     </div>
 </div>
 
 <div class="app-card">
-    <span class="app-status status-coming-soon">Coming Soon</span>
-    <h3>🕸️ Web Scraping Playground</h3>
+    <span class="app-status status-coming-soon">Demnächst</span>
+    <h3>🕸️ Web-Scraping-Spielplatz</h3>
     <p class="app-description">
-        Test your scraping strategies on real websites with instant feedback. See how different configurations affect your results.
+        Testen Sie Ihre Scraping-Strategien auf echten Websites mit sofortigem Feedback. Sehen Sie, wie verschiedene Konfigurationen Ihre Ergebnisse beeinflussen.
     </p>
     <ul class="app-features">
-        <li>Live website testing</li>
-        <li>Side-by-side result comparison</li>
-        <li>Performance metrics</li>
-        <li>Export configurations</li>
+        <li>Live-Website-Tests</li>
+        <li>Nebeneinander-Ergebnisvergleich</li>
+        <li>Leistungsmetriken</li>
+        <li>Konfigurationen exportieren</li>
     </ul>
     <div class="app-action">
-        <a href="#" class="app-btn disabled">Coming Soon</a>
+        <a href="#" class="app-btn disabled">Demnächst</a>
     </div>
 </div>
 
 <div class="app-card">
-    <span class="app-status status-available">Available</span>
-    <h3>🔍 Crawl4AI Assistant (Chrome Extension)</h3>
+    <span class="app-status status-available">Verfügbar</span>
+    <h3>🔍 Crawl4AI Assistent (Chrome-Erweiterung)</h3>
     <p class="app-description">
-        Visual schema builder Chrome extension - click on webpage elements to generate extraction schemas and Python code!
+        Visueller Schema-Ersteller Chrome-Erweiterung - klicken Sie auf Webseiten-Elemente, um Extraktionsschemas und Python-Code zu generieren!
     </p>
     <ul class="app-features">
-        <li>Visual element selection</li>
-        <li>Container & field selection modes</li>
-        <li>Smart selector generation</li>
-        <li>Complete Python code generation</li>
-        <li>One-click installation</li>
+        <li>Visuelle Elementauswahl</li>
+        <li>Container- & Feldauswahl-Modi</li>
+        <li>Intelligente Selektor-Generierung</li>
+        <li>Vollständige Python-Code-Generierung</li>
+        <li>Ein-Klick-Installation</li>
     </ul>
     <div class="app-action">
-        <a href="crawl4ai-assistant/" class="app-btn">Install Extension →</a>
+        <a href="crawl4ai-assistant/" class="app-btn">Erweiterung installieren →</a>
     </div>
 </div>
 
 <div class="app-card">
-    <span class="app-status status-coming-soon">Coming Soon</span>
-    <h3>🧪 Extraction Lab</h3>
+    <span class="app-status status-coming-soon">Demnächst</span>
+    <h3>🧪 Extraktions-Labor</h3>
     <p class="app-description">
-        Experiment with different extraction strategies and see how they perform on your content. Compare LLM vs CSS vs XPath approaches.
+        Experimentieren Sie mit verschiedenen Extraktionsstrategien und sehen Sie, wie sie bei Ihrem Inhalt abschneiden. Vergleichen Sie LLM vs CSS vs XPath-Ansätze.
     </p>
     <ul class="app-features">
-        <li>Strategy comparison tools</li>
-        <li>Performance benchmarks</li>
-        <li>Cost estimation for LLM strategies</li>
-        <li>Best practice recommendations</li>
+        <li>Strategie-Vergleichswerkzeuge</li>
+        <li>Leistungs-Benchmarks</li>
+        <li>Kostenschätzung für LLM-Strategien</li>
+        <li>Best-Practice-Empfehlungen</li>
     </ul>
     <div class="app-action">
-        <a href="#" class="app-btn disabled">Coming Soon</a>
+        <a href="#" class="app-btn disabled">Demnächst</a>
     </div>
 </div>
 
 <div class="app-card">
-    <span class="app-status status-coming-soon">Coming Soon</span>
-    <h3>🤖 AI Prompt Designer</h3>
+    <span class="app-status status-coming-soon">Demnächst</span>
+    <h3>🤖 KI-Prompt-Designer</h3>
     <p class="app-description">
-        Craft and test prompts for LLM-based extraction. See how different prompts affect extraction quality and costs.
+        Erstellen und testen Sie Prompts für LLM-basierte Extraktion. Sehen Sie, wie verschiedene Prompts Extraktionsqualität und Kosten beeinflussen.
     </p>
     <ul class="app-features">
-        <li>Prompt templates library</li>
-        <li>A/B testing interface</li>
-        <li>Token usage calculator</li>
-        <li>Quality metrics</li>
+        <li>Prompt-Vorlagen-Bibliothek</li>
+        <li>A/B-Test-Oberfläche</li>
+        <li>Token-Nutzungsrechner</li>
+        <li>Qualitätsmetriken</li>
     </ul>
     <div class="app-action">
-        <a href="#" class="app-btn disabled">Coming Soon</a>
+        <a href="#" class="app-btn disabled">Demnächst</a>
     </div>
 </div>
 
 <div class="app-card">
-    <span class="app-status status-coming-soon">Coming Soon</span>
-    <h3>📊 Crawl Monitor</h3>
+    <span class="app-status status-coming-soon">Demnächst</span>
+    <h3>📊 Crawl-Monitor</h3>
     <p class="app-description">
-        Real-time monitoring dashboard for your crawling operations. Track performance, debug issues, and optimize your scrapers.
+        Echtzeit-Überwachungs-Dashboard für Ihre Crawling-Operationen. Verfolgen Sie Leistung, debuggen Sie Probleme und optimieren Sie Ihre Scraper.
     </p>
     <ul class="app-features">
-        <li>Real-time crawl statistics</li>
-        <li>Error tracking and debugging</li>
-        <li>Resource usage monitoring</li>
-        <li>Historical analytics</li>
+        <li>Echtzeit-Crawl-Statistiken</li>
+        <li>Fehlerverfolgung und Debugging</li>
+        <li>Ressourcennutzungs-Überwachung</li>
+        <li>Historische Analysen</li>
     </ul>
     <div class="app-action">
-        <a href="#" class="app-btn disabled">Coming Soon</a>
+        <a href="#" class="app-btn disabled">Demnächst</a>
     </div>
 </div>
 
 </div>
 
-## 🚀 Why Use These Apps?
+## 🚀 Warum diese Apps nutzen?
 
-### 🎯 **Accelerate Learning**
-Visual tools help you understand Crawl4AI's concepts faster than reading documentation alone.
+### 🎯 **Lernen beschleunigen**
+Visuelle Werkzeuge helfen Ihnen, Crawl4AIs Konzepte schneller zu verstehen als nur Dokumentation zu lesen.
 
-### 💡 **Reduce Development Time**
-Generate working code instantly instead of writing everything from scratch.
+### 💡 **Entwicklungszeit reduzieren**
+Generieren Sie sofort funktionierenden Code, anstatt alles von Grund auf zu schreiben.
 
-### 🔍 **Improve Quality**
-Test and refine your approach before deploying to production.
+### 🔍 **Qualität verbessern**
+Testen und verfeinern Sie Ihren Ansatz, bevor Sie ihn in die Produktion deployen.
 
-### 🤝 **Community Driven**
-These tools are built based on user feedback. Have an idea? [Let us know](https://github.com/unclecode/crawl4ai/issues)!
+### 🤝 **Community-gesteuert**
+Diese Werkzeuge werden basierend auf Nutzer-Feedback erstellt.
 
-## 📢 Stay Updated
+## 📢 Bleiben Sie auf dem Laufenden
 
-Want to know when new apps are released? 
-
-- ⭐ [Star us on GitHub](https://github.com/unclecode/crawl4ai) to get notifications
-- 🐦 Follow [@unclecode](https://twitter.com/unclecode) for announcements
-- 💬 Join our [Discord community](https://discord.gg/crawl4ai) for early access
+Möchten Sie wissen, wann neue Apps veröffentlicht werden? Besuchen Sie regelmäßig unsere Dokumentation für Updates!
 
 ---
 
-!!! tip "Developer Resources"
-    Building your own tools with Crawl4AI? Check out our [API Reference](../api/async-webcrawler.md) and [Integration Guide](../advanced/advanced-features.md) for comprehensive documentation.
+!!! tip "Entwickler-Ressourcen"
+    Erstellen Sie Ihre eigenen Werkzeuge mit Crawl4AI? Schauen Sie sich unsere [API-Referenz](../api/async-webcrawler.md) und den [Integrations-Leitfaden](../advanced/advanced-features.md) für umfassende Dokumentation an.
