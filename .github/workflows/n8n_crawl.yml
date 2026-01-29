@@ -1,0 +1,38 @@
+name: n8n Crawler Bridge
+
+on:
+  repository_dispatch:
+    types: [crawl_request]
+  workflow_dispatch: # Allows manual testing from GitHub UI
+    inputs:
+      target_url:
+        description: 'URL to crawl'
+        required: true
+      callback_url:
+        description: 'n8n Webhook URL'
+        required: true
+
+jobs:
+  crawl_and_respond:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install crawl4ai requests
+          playwright install chromium
+
+      - name: Run Crawler
+        env:
+          # Handle inputs from both repository_dispatch (n8n) and workflow_dispatch (manual)
+          TARGET_URL: ${{ github.event.client_payload.url || inputs.target_url }}
+          CALLBACK_URL: ${{ github.event.client_payload.callback_url || inputs.callback_url }}
+        run: python n8n_runner.py
