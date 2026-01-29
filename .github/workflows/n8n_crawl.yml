@@ -11,6 +11,9 @@ on:
       callback_url:
         description: 'n8n Webhook URL'
         required: true
+      resumeUrl:
+        description: 'n8n resume webhook URL'
+        required: false
 
 jobs:
   crawl_and_respond:
