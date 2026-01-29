@@ -93,8 +93,9 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
         """
         # Initialize browser config, either from provided object or kwargs
         self.browser_config = browser_config or BrowserConfig.from_kwargs(kwargs)
-        self.logger = logger
-
+        # Initialize with default logger if none provided to prevent NoneType errors
+        self.logger = logger if logger is not None else AsyncLogger(verbose=False)
+        
         # Initialize browser adapter
         self.adapter = browser_adapter or PlaywrightAdapter()
 
@@ -1256,11 +1257,11 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
             all_contexts = page.context.browser.contexts
             total_pages = sum(len(context.pages) for context in all_contexts)
             if config.session_id:
+                # Session keeps exclusive access to the page - don't release
                 pass
-            elif total_pages <= 1 and (
-                self.browser_config.use_managed_browser or self.browser_config.headless
-            ):
-                pass
+            elif total_pages <= 1 and (self.browser_config.use_managed_browser or self.browser_config.headless):
+                # Keep the page open but release it for reuse by next crawl
+                self.browser_manager.release_page(page)
             else:
                 # Detach listeners before closing to prevent potential errors during close
                 if config.capture_network_requests:
@@ -1276,10 +1277,10 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
                         captured_console.extend(final_messages)
 
                     # Clean up console capture
-                    await self.adapter.cleanup_console_capture(
-                        page, handle_console, handle_error
-                    )
+                    await self.adapter.cleanup_console_capture(page, handle_console, handle_error)
 
+                # Release page from tracking before closing
+                self.browser_manager.release_page(page)
                 # Close the page
                 await page.close()
 
@@ -1813,6 +1814,7 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
             # Clean up the page
             if page:
                 try:
+                    self.browser_manager.release_page(page)
                     await page.close()
                 except Exception:
                     pass
