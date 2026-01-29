@@ -47,6 +47,14 @@ from bs4 import BeautifulSoup
 from lxml import html, etree
 
 
+def _strip_markdown_fences(text: str) -> str:
+    """Strip markdown code fences (e.g. ```json ... ```) from LLM responses."""
+    text = text.strip()
+    return re.sub(
+        r"^```(?:[a-zA-Z0-9_-]+)?\s*|```$", "", text, flags=re.MULTILINE
+    ).strip()
+
+
 class ExtractionStrategy(ABC):
     """
     Abstract base class for all extraction strategies.
@@ -1513,7 +1521,12 @@ In this scenario, use your best judgment to generate the schema. You need to exa
                 base_url=llm_config.base_url,
                 extra_args=kwargs
             )
-            return json.loads(response.choices[0].message.content)
+            raw = response.choices[0].message.content
+            if not raw or not raw.strip():
+                raise ValueError("LLM returned an empty response")
+            return json.loads(_strip_markdown_fences(raw))
+        except json.JSONDecodeError as e:
+            raise Exception(f"Failed to parse schema JSON: {str(e)}")
         except Exception as e:
             raise Exception(f"Failed to generate schema: {str(e)}")
 
