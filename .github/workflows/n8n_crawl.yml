@@ -14,8 +14,6 @@ on:
 jobs:
   crawl_and_respond:
     runs-on: ubuntu-latest
-    outputs:
-      result: ${{ steps.crawl.outputs.result }}
     
     steps:
       - name: Checkout code
@@ -35,11 +33,16 @@ jobs:
           
       - name: Install Dependencies
         run: |
-          pip install crawl4ai requests
+          pip install -r requirements.txt
           playwright install chromium
           
+      - name: Debug - Show inputs
+        run: |
+          echo "Target URL: ${{ inputs.target_url }}"
+          echo "Resume URL: ${{ inputs.resumeUrl }}"
+          
       - name: Run Crawler
-        id: crawl
         env:
           TARGET_URL: ${{ github.event.client_payload.url || inputs.target_url }}
+          RESUME_URL: ${{ inputs.resumeUrl }}
         run: python n8n_runner.py
