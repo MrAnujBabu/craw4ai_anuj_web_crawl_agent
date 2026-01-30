@@ -43,7 +43,41 @@ class MatchMode(Enum):
     AND = "and"
 
 
-# from .proxy_strategy import ProxyConfig
+# Allowlist of types that can be deserialized via from_serializable_dict().
+# This prevents arbitrary class instantiation from untrusted input (e.g. API requests).
+ALLOWED_DESERIALIZE_TYPES = {
+    # Config classes
+    "BrowserConfig", "CrawlerRunConfig", "HTTPCrawlerConfig",
+    "LLMConfig", "ProxyConfig", "GeolocationConfig",
+    "SeedingConfig", "VirtualScrollConfig", "LinkPreviewConfig",
+    # Extraction strategies
+    "JsonCssExtractionStrategy", "JsonXPathExtractionStrategy",
+    "JsonLxmlExtractionStrategy", "LLMExtractionStrategy",
+    "CosineStrategy", "RegexExtractionStrategy",
+    # Markdown / content
+    "DefaultMarkdownGenerator",
+    "PruningContentFilter", "BM25ContentFilter", "LLMContentFilter",
+    # Scraping
+    "LXMLWebScrapingStrategy",
+    # Chunking
+    "RegexChunking",
+    # Deep crawl
+    "BFSDeepCrawlStrategy", "DFSDeepCrawlStrategy", "BestFirstCrawlingStrategy",
+    # Filters & scorers
+    "FilterChain", "URLPatternFilter", "DomainFilter",
+    "ContentTypeFilter", "URLFilter", "SEOFilter", "ContentRelevanceFilter",
+    "KeywordRelevanceScorer", "URLScorer", "CompositeScorer",
+    "DomainAuthorityScorer", "FreshnessScorer", "PathDepthScorer",
+    # Enums
+    "CacheMode", "MatchMode", "DisplayMode",
+    # Dispatchers
+    "MemoryAdaptiveDispatcher", "SemaphoreDispatcher",
+    # Table extraction
+    "DefaultTableExtraction", "NoTableExtraction",
+    # Proxy
+    "RoundRobinProxyStrategy",
+}
+
 
 def to_serializable_dict(obj: Any, ignore_default_value : bool = False):
     """
@@ -141,15 +175,21 @@ def from_serializable_dict(data: Any) -> Any:
         if data["type"] == "dict" and "value" in data:
             return {k: from_serializable_dict(v) for k, v in data["value"].items()}
 
+        # Security: only allow known-safe types to be deserialized
+        type_name = data["type"]
+        if type_name not in ALLOWED_DESERIALIZE_TYPES:
+            raise ValueError(
+                f"Deserialization of type '{type_name}' is not allowed. "
+                f"Only allowlisted configuration and strategy types can be deserialized."
+            )
+
         cls = None
-        # If you are receiving an error while trying to convert a dict to an object:
-        # Either add a module to `modules_paths` list, or add the `data["type"]` to the crawl4ai __init__.py file
         module_paths = ["crawl4ai"]
         for module_path in module_paths:
             try:
                 mod = importlib.import_module(module_path)
-                if hasattr(mod, data["type"]):
-                    cls = getattr(mod, data["type"])
+                if hasattr(mod, type_name):
+                    cls = getattr(mod, type_name)
                     break
             except (ImportError, AttributeError):
                 continue
