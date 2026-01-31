@@ -425,6 +425,15 @@ class BrowserConfig:
                                      the local Playwright client resources. Useful for cloud/server scenarios
                                      where you don't own the remote browser but need to prevent memory leaks
                                      from accumulated Playwright instances. Default: False.
+        cdp_close_delay (float): Seconds to wait after disconnecting a CDP WebSocket before stopping the
+                                 Playwright subprocess. Gives the connection time to fully release. Set to
+                                 0 to skip the delay entirely. Only applies when cdp_cleanup_on_close=True.
+                                 Default: 1.0.
+        cache_cdp_connection (bool): When True and using cdp_url, the Playwright subprocess and CDP WebSocket
+                                     are cached at the class level and shared across multiple BrowserManager
+                                     instances connecting to the same cdp_url. Reference-counted; the connection
+                                     is only closed when the last user releases it. Eliminates the overhead of
+                                     repeated Playwright/CDP setup and teardown. Default: False.
         create_isolated_context (bool): When True and using cdp_url, forces creation of a new browser context
                                         instead of reusing the default context. Essential for concurrent crawls
                                         on the same browser to prevent navigation conflicts. Default: False.
@@ -485,6 +494,8 @@ class BrowserConfig:
         browser_context_id: str = None,
         target_id: str = None,
         cdp_cleanup_on_close: bool = False,
+        cdp_close_delay: float = 1.0,
+        cache_cdp_connection: bool = False,
         create_isolated_context: bool = False,
         use_persistent_context: bool = False,
         user_data_dir: str = None,
@@ -529,6 +540,8 @@ class BrowserConfig:
         self.browser_context_id = browser_context_id
         self.target_id = target_id
         self.cdp_cleanup_on_close = cdp_cleanup_on_close
+        self.cdp_close_delay = cdp_close_delay
+        self.cache_cdp_connection = cache_cdp_connection
         self.create_isolated_context = create_isolated_context
         self.use_persistent_context = use_persistent_context
         self.user_data_dir = user_data_dir
