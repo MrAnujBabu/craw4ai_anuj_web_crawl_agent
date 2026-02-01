@@ -145,8 +145,9 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
         Close the browser and clean up resources.
         """
         await self.browser_manager.close()
-        # Explicitly reset the static Playwright instance
-        BrowserManager._playwright_instance = None
+        # Explicitly reset the static Playwright instance (skip if using cached CDP)
+        if not self.browser_manager._using_cached_cdp:
+            BrowserManager._playwright_instance = None
 
     async def kill_session(self, session_id: str):
         """
@@ -1188,7 +1189,9 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
                 if config.screenshot_wait_for:
                     await asyncio.sleep(config.screenshot_wait_for)
                 screenshot_data = await self.take_screenshot(
-                    page, screenshot_height_threshold=config.screenshot_height_threshold
+                    page,
+                    screenshot_height_threshold=config.screenshot_height_threshold,
+                    force_viewport_screenshot=config.force_viewport_screenshot
                 )
 
             if screenshot_data or pdf_data or mhtml_data:
@@ -1830,6 +1833,13 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
         Returns:
             str: The base64-encoded screenshot data
         """
+        # Check if viewport-only screenshot is forced
+        force_viewport = kwargs.get('force_viewport_screenshot', False)
+
+        if force_viewport:
+            # Use viewport-only screenshot
+            return await self.take_screenshot_naive(page)
+
         need_scroll = await self.page_need_scroll(page)
 
         if not need_scroll:

@@ -174,6 +174,7 @@ If your page is a single-page app with repeated JS updates, set `js_only=True` i
 | **`screenshot`**                           | `bool` (False)      | Capture a screenshot (base64) in `result.screenshot`.                                                     |
 | **`screenshot_wait_for`**                  | `float or None`     | Extra wait time before the screenshot.                                                                    |
 | **`screenshot_height_threshold`**          | `int` (~20000)      | If the page is taller than this, alternate screenshot strategies are used.                                |
+| **`force_viewport_screenshot`**            | `bool` (False)      | If `True`, always captures a viewport-only screenshot regardless of page height. Faster and smaller than full-page screenshots. |
 | **`pdf`**                                  | `bool` (False)      | If `True`, returns a PDF in `result.pdf`.                                                                 |
 | **`capture_mhtml`**                        | `bool` (False)      | If `True`, captures an MHTML snapshot of the page in `result.mhtml`. MHTML includes all page resources (CSS, images, etc.) in a single file. |
 | **`image_description_min_word_threshold`** | `int` (~50)         | Minimum words for an image's alt text or description to be considered valid.                              |
@@ -367,6 +368,55 @@ no_cache_config = base_config.clone(
 
 The `clone()` method is particularly useful when you need slightly different configurations for different use cases, without modifying the original config.
 
+### Class-Level Defaults (`set_defaults` / `get_defaults` / `reset_defaults`)
+
+Both config classes support class-level default overrides. When deploying in a server or cloud context, this eliminates the need to pass the same parameters at every call site.
+
+**Resolution order:** explicit arg > class-level default > hardcoded default
+
+```python
+from crawl4ai import BrowserConfig, CrawlerRunConfig
+
+# Set once at application startup
+BrowserConfig.set_defaults(
+    cache_cdp_connection=True,
+    cdp_close_delay=0,
+    create_isolated_context=True,
+)
+CrawlerRunConfig.set_defaults(verbose=False)
+
+# All new instances inherit the class defaults
+cfg1 = BrowserConfig(cdp_url="ws://localhost:9222")
+# → cache_cdp_connection=True, cdp_close_delay=0
+
+cfg2 = BrowserConfig(cdp_url="ws://localhost:9222", cache_cdp_connection=False)
+# → cache_cdp_connection=False (explicit value wins)
+
+# Inspect current defaults
+BrowserConfig.get_defaults()
+# → {"cache_cdp_connection": True, "cdp_close_delay": 0, "create_isolated_context": True}
+
+# Remove a single default
+BrowserConfig.reset_defaults("cdp_close_delay")
+
+# Remove all defaults
+BrowserConfig.reset_defaults()
+```
+
+**API Reference:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `set_defaults` | `set_defaults(**kwargs)` | Set class-level defaults for new instances. Raises `ValueError` if any key is not a valid `__init__` parameter. |
+| `get_defaults` | `get_defaults() → dict` | Return a deep copy of the current class-level defaults. |
+| `reset_defaults` | `reset_defaults(*names)` | With no args, clears all defaults. With args, removes only the named defaults. |
+
+**Notes:**
+- Defaults are independent per class — `BrowserConfig.set_defaults()` has no effect on `CrawlerRunConfig`.
+- Mutable values (lists, dicts) are deep-copied on storage and on each instance creation, so instances do not share objects.
+- `clone()`, `dump()`/`load()`, and `from_kwargs()` all work correctly with class defaults — serialized data is self-contained and independent of the current class defaults.
+- Defaults are stored in memory for the lifetime of the process. They are not persisted to disk.
+
 ## 2.3 Example Usage
 
 ```python
@@ -467,4 +517,8 @@ stream_cfg = run_cfg.clone(
     stream=True,
     cache_mode=CacheMode.BYPASS
 )
+
+# Or set project-wide defaults once at startup
+BrowserConfig.set_defaults(headless=True, text_mode=True)
+CrawlerRunConfig.set_defaults(cache_mode=CacheMode.BYPASS)
 ```

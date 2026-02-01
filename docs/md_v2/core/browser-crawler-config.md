@@ -136,6 +136,41 @@ debug_browser = base_browser.clone(
 )
 ```
 
+### Class-Level Defaults
+
+Both `BrowserConfig` and `CrawlerRunConfig` support **class-level default overrides** via `set_defaults()`. This is useful in server/cloud deployments where every config instance needs the same base settings — set them once at startup instead of repeating at every call site.
+
+```python
+from crawl4ai import BrowserConfig, CrawlerRunConfig
+
+# At application startup — one time
+BrowserConfig.set_defaults(
+    cache_cdp_connection=True,
+    cdp_close_delay=0,
+    create_isolated_context=True,
+)
+CrawlerRunConfig.set_defaults(verbose=False)
+
+# Every new instance automatically inherits those defaults
+cfg = BrowserConfig(cdp_url="ws://localhost:9222")
+# → cache_cdp_connection=True, cdp_close_delay=0, create_isolated_context=True
+
+# Explicit values still win
+cfg = BrowserConfig(cdp_url="ws://localhost:9222", cache_cdp_connection=False)
+# → cache_cdp_connection=False (explicit overrides the class default)
+```
+
+**Available methods** (on both `BrowserConfig` and `CrawlerRunConfig`):
+
+| Method | Description |
+|--------|-------------|
+| `set_defaults(**kwargs)` | Set class-level defaults. Invalid parameter names raise `ValueError`. |
+| `get_defaults()` | Return a copy of the current class-level defaults. |
+| `reset_defaults()` | Clear all class-level defaults. |
+| `reset_defaults("param1", "param2")` | Clear only the named defaults. |
+
+> **Note:** Class defaults are independent per class — `BrowserConfig.set_defaults()` does not affect `CrawlerRunConfig`, and vice versa. Defaults are stored in memory and apply for the lifetime of the process.
+
 **Minimal Example**:
 
 ```python
@@ -224,9 +259,10 @@ class CrawlerRunConfig:
    - A CSS or JS expression to wait for before extracting content.  
    - Common usage: `wait_for="css:.main-loaded"` or `wait_for="js:() => window.loaded === true"`.
 
-8.⠀**`screenshot`**, **`pdf`**, & **`capture_mhtml`**:  
-   - If `True`, captures a screenshot, PDF, or MHTML snapshot after the page is fully loaded.  
+8.⠀**`screenshot`**, **`pdf`**, & **`capture_mhtml`**:
+   - If `True`, captures a screenshot, PDF, or MHTML snapshot after the page is fully loaded.
    - The results go to `result.screenshot` (base64), `result.pdf` (bytes), or `result.mhtml` (string).
+   - Use `force_viewport_screenshot=True` to capture only the visible viewport instead of the full page. This is faster and produces smaller images when you don't need a full-page screenshot.
 
 9.⠀**Location Parameters**:  
    - **`locale`**: Browser's locale (e.g., `"en-US"`, `"fr-FR"`) for language preferences

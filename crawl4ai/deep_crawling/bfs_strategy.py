@@ -174,7 +174,7 @@ class BFSDeepCrawlStrategy(DeepCrawlStrategy):
             base_url = normalize_url_for_deep_crawl(url, source_url)
             if base_url in visited:
                 continue
-            if not await self.can_process_url(url, next_depth):
+            if not await self.can_process_url(base_url, next_depth):
                 self.stats.urls_skipped += 1
                 continue
 

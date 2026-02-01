@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 import os
 import sys
 import shutil
@@ -559,6 +559,91 @@ async def clone_runtime_state(
 
 
 
+class _CDPConnectionCache:
+    """
+    Class-level cache for Playwright + CDP browser connections.
+
+    When enabled via BrowserConfig(cache_cdp_connection=True), multiple
+    BrowserManager instances connecting to the same cdp_url will share
+    a single Playwright subprocess and CDP WebSocket. Reference-counted;
+    the connection is closed when the last user releases it.
+    """
+
+    _cache: Dict[str, Tuple] = {}  # cdp_url -> (playwright, browser, ref_count)
+    _lock: Optional[asyncio.Lock] = None  # lazy-init to avoid event loop issues
+    _lock_loop: Optional[asyncio.AbstractEventLoop] = None
+
+    @classmethod
+    def _get_lock(cls) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if cls._lock is None or cls._lock_loop is not loop:
+            cls._lock = asyncio.Lock()
+            cls._lock_loop = loop
+        return cls._lock
+
+    @classmethod
+    async def acquire(cls, cdp_url: str, use_undetected: bool = False):
+        """Get or create a cached (playwright, browser) for this cdp_url."""
+        async with cls._get_lock():
+            if cdp_url in cls._cache:
+                pw, browser, count = cls._cache[cdp_url]
+                if browser.is_connected():
+                    cls._cache[cdp_url] = (pw, browser, count + 1)
+                    return pw, browser
+                # Stale connection — clean up and fall through to create new
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
+                del cls._cache[cdp_url]
+
+            # Create new connection
+            if use_undetected:
+                from patchright.async_api import async_playwright
+            else:
+                from playwright.async_api import async_playwright
+            pw = await async_playwright().start()
+            browser = await pw.chromium.connect_over_cdp(cdp_url)
+            cls._cache[cdp_url] = (pw, browser, 1)
+            return pw, browser
+
+    @classmethod
+    async def release(cls, cdp_url: str):
+        """Decrement ref count; close connection when last user releases."""
+        async with cls._get_lock():
+            if cdp_url not in cls._cache:
+                return
+            pw, browser, count = cls._cache[cdp_url]
+            if count <= 1:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
+                del cls._cache[cdp_url]
+            else:
+                cls._cache[cdp_url] = (pw, browser, count - 1)
+
+    @classmethod
+    async def close_all(cls):
+        """Force-close all cached connections. Call on application shutdown."""
+        async with cls._get_lock():
+            for cdp_url in list(cls._cache.keys()):
+                pw, browser, _ = cls._cache[cdp_url]
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
+            cls._cache.clear()
+
+
 class BrowserManager:
     """
     Manages the browser instance and context.
@@ -616,6 +701,7 @@ class BrowserManager:
         self.default_context = None
         self.managed_browser = None
         self.playwright = None
+        self._using_cached_cdp = False
 
         # Session management
         self.sessions = {}
@@ -665,24 +751,36 @@ class BrowserManager:
         """
         if self.playwright is not None:
             await self.close()
-            
-        if self.use_undetected:
-            from patchright.async_api import async_playwright
-        else:
-            from playwright.async_api import async_playwright
 
-        # Initialize playwright
-        self.playwright = await async_playwright().start()
+        # Use cached CDP connection if enabled and cdp_url is set
+        if self.config.cache_cdp_connection and self.config.cdp_url:
+            self._using_cached_cdp = True
+            self.config.use_managed_browser = True
+            self.playwright, self.browser = await _CDPConnectionCache.acquire(
+                self.config.cdp_url, self.use_undetected
+            )
+        else:
+            self._using_cached_cdp = False
+            if self.use_undetected:
+                from patchright.async_api import async_playwright
+            else:
+                from playwright.async_api import async_playwright
+
+            # Initialize playwright
+            self.playwright = await async_playwright().start()
 
         if self.config.cdp_url or self.config.use_managed_browser:
             self.config.use_managed_browser = True
-            cdp_url = await self.managed_browser.start() if not self.config.cdp_url else self.config.cdp_url
 
-            # Add CDP endpoint verification before connecting
-            if not await self._verify_cdp_ready(cdp_url):
-                raise Exception(f"CDP endpoint at {cdp_url} is not ready after startup")
+            if not self._using_cached_cdp:
+                cdp_url = await self.managed_browser.start() if not self.config.cdp_url else self.config.cdp_url
 
-            self.browser = await self.playwright.chromium.connect_over_cdp(cdp_url)
+                # Add CDP endpoint verification before connecting
+                if not await self._verify_cdp_ready(cdp_url):
+                    raise Exception(f"CDP endpoint at {cdp_url} is not ready after startup")
+
+                self.browser = await self.playwright.chromium.connect_over_cdp(cdp_url)
+
             contexts = self.browser.contexts
 
             # If browser_context_id is provided, we're using a pre-created context
@@ -1409,6 +1507,24 @@ class BrowserManager:
 
     async def close(self):
         """Close all browser resources and clean up."""
+        # Cached CDP path: only clean up this instance's sessions/contexts,
+        # then release the shared connection reference.
+        if self._using_cached_cdp:
+            session_ids = list(self.sessions.keys())
+            for session_id in session_ids:
+                await self.kill_session(session_id)
+            for ctx in self.contexts_by_config.values():
+                try:
+                    await ctx.close()
+                except Exception:
+                    pass
+            self.contexts_by_config.clear()
+            await _CDPConnectionCache.release(self.config.cdp_url)
+            self.browser = None
+            self.playwright = None
+            self._using_cached_cdp = False
+            return
+
         if self.config.cdp_url:
             # When using external CDP, we don't own the browser process.
             # If cdp_cleanup_on_close is True, properly disconnect from the browser
@@ -1440,7 +1556,8 @@ class BrowserManager:
                             )
                     self.browser = None
                     # Allow time for CDP connection to fully release before another client connects
-                    await asyncio.sleep(1.0)
+                    if self.config.cdp_close_delay > 0:
+                        await asyncio.sleep(self.config.cdp_close_delay)
 
                 # Stop Playwright instance to prevent memory leaks
                 if self.playwright:

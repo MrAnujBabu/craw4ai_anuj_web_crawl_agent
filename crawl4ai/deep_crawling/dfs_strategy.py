@@ -300,7 +300,7 @@ class DFSDeepCrawlStrategy(BFSDeepCrawlStrategy):
             if not normalized_url or normalized_url in seen:
                 continue
 
-            if not await self.can_process_url(raw_url, next_depth):
+            if not await self.can_process_url(normalized_url, next_depth):
                 self.stats.urls_skipped += 1
                 continue
 

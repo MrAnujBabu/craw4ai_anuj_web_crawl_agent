@@ -1,3 +1,5 @@
+import copy
+import functools
 import importlib
 import os
 import warnings
@@ -36,6 +38,83 @@ from enum import Enum
 
 # Type alias for URL matching
 UrlMatcher = Union[str, Callable[[str], bool], List[Union[str, Callable[[str], bool]]]]
+
+
+def _with_defaults(cls):
+    """Class decorator: adds set_defaults/get_defaults/reset_defaults classmethods.
+
+    After decorating, every new instance resolves parameters as:
+        explicit arg  >  class-level user defaults  >  hardcoded default
+
+    Usage::
+
+        BrowserConfig.set_defaults(headless=False, viewport_width=1920)
+        cfg = BrowserConfig()          # headless=False, viewport_width=1920
+        cfg = BrowserConfig(headless=True)  # explicit wins → headless=True
+    """
+    original_init = cls.__init__
+    sig = inspect.signature(original_init)
+    param_names = [p for p in sig.parameters if p != "self"]
+    valid_params = frozenset(param_names)
+
+    @functools.wraps(original_init)
+    def wrapped_init(self, *args, **kwargs):
+        user_defaults = type(self)._user_defaults
+        if user_defaults:
+            # Determine which params the caller passed explicitly
+            explicit = set(kwargs.keys())
+            for i in range(len(args)):
+                if i < len(param_names):
+                    explicit.add(param_names[i])
+            # Inject user defaults for non-explicit params
+            for key, value in user_defaults.items():
+                if key not in explicit:
+                    kwargs[key] = copy.deepcopy(value)
+        original_init(self, *args, **kwargs)
+
+    cls.__init__ = wrapped_init
+    cls._user_defaults = {}
+
+    @classmethod
+    def set_defaults(klass, **kwargs):
+        """Set class-level default overrides for new instances.
+
+        Args:
+            **kwargs: Parameter names and their default values.
+
+        Raises:
+            ValueError: If any key is not a valid ``__init__`` parameter.
+        """
+        invalid = set(kwargs) - valid_params
+        if invalid:
+            raise ValueError(
+                f"Invalid parameter(s) for {klass.__name__}: {invalid}"
+            )
+        for k, v in kwargs.items():
+            klass._user_defaults[k] = copy.deepcopy(v)
+
+    @classmethod
+    def get_defaults(klass):
+        """Return a deep copy of the current class-level defaults."""
+        return copy.deepcopy(klass._user_defaults)
+
+    @classmethod
+    def reset_defaults(klass, *names):
+        """Clear class-level defaults.
+
+        With no arguments, removes all overrides.
+        With arguments, removes only the named overrides.
+        """
+        if names:
+            for n in names:
+                klass._user_defaults.pop(n, None)
+        else:
+            klass._user_defaults.clear()
+
+    cls.set_defaults = set_defaults
+    cls.get_defaults = get_defaults
+    cls.reset_defaults = reset_defaults
+    return cls
 
 
 class MatchMode(Enum):
@@ -399,7 +478,7 @@ class ProxyConfig:
         config_dict.update(kwargs)
         return ProxyConfig.from_dict(config_dict)
 
-
+@_with_defaults
 class BrowserConfig:
     """
     Configuration class for setting up a browser instance and its context in AsyncPlaywrightCrawlerStrategy.
@@ -433,6 +512,15 @@ class BrowserConfig:
                                      the local Playwright client resources. Useful for cloud/server scenarios
                                      where you don't own the remote browser but need to prevent memory leaks
                                      from accumulated Playwright instances. Default: False.
+        cdp_close_delay (float): Seconds to wait after disconnecting a CDP WebSocket before stopping the
+                                 Playwright subprocess. Gives the connection time to fully release. Set to
+                                 0 to skip the delay entirely. Only applies when cdp_cleanup_on_close=True.
+                                 Default: 1.0.
+        cache_cdp_connection (bool): When True and using cdp_url, the Playwright subprocess and CDP WebSocket
+                                     are cached at the class level and shared across multiple BrowserManager
+                                     instances connecting to the same cdp_url. Reference-counted; the connection
+                                     is only closed when the last user releases it. Eliminates the overhead of
+                                     repeated Playwright/CDP setup and teardown. Default: False.
         create_isolated_context (bool): When True and using cdp_url, forces creation of a new browser context
                                         instead of reusing the default context. Essential for concurrent crawls
                                         on the same browser to prevent navigation conflicts. Default: False.
@@ -493,6 +581,8 @@ class BrowserConfig:
         browser_context_id: str = None,
         target_id: str = None,
         cdp_cleanup_on_close: bool = False,
+        cdp_close_delay: float = 1.0,
+        cache_cdp_connection: bool = False,
         create_isolated_context: bool = False,
         use_persistent_context: bool = False,
         user_data_dir: str = None,
@@ -536,6 +626,8 @@ class BrowserConfig:
         self.browser_context_id = browser_context_id
         self.target_id = target_id
         self.cdp_cleanup_on_close = cdp_cleanup_on_close
+        self.cdp_close_delay = cdp_close_delay
+        self.cache_cdp_connection = cache_cdp_connection
         self.create_isolated_context = create_isolated_context
         self.use_persistent_context = use_persistent_context
         self.user_data_dir = user_data_dir
@@ -1044,6 +1136,8 @@ class HTTPCrawlerConfig:
             return config
         return HTTPCrawlerConfig.from_kwargs(config)
 
+@_with_defaults
+class CrawlerRunConfig():
 
 class CrawlerRunConfig:
     """
@@ -1202,6 +1296,9 @@ class CrawlerRunConfig:
                                              Default: None.
         screenshot_height_threshold (int): Threshold for page height to decide screenshot strategy.
                                            Default: SCREENSHOT_HEIGHT_TRESHOLD (from config, e.g. 20000).
+        force_viewport_screenshot (bool): If True, always take viewport-only screenshots regardless of page height.
+                                          When False, uses automatic decision (viewport for short pages, full-page for long pages).
+                                          Default: False.
         pdf (bool): Whether to generate a PDF of the page.
                     Default: False.
         image_description_min_word_threshold (int): Minimum words for image description extraction.
@@ -1355,6 +1452,7 @@ class CrawlerRunConfig:
         screenshot: bool = False,
         screenshot_wait_for: float = None,
         screenshot_height_threshold: int = SCREENSHOT_HEIGHT_TRESHOLD,
+        force_viewport_screenshot: bool = False,
         pdf: bool = False,
         capture_mhtml: bool = False,
         image_description_min_word_threshold: int = IMAGE_DESCRIPTION_MIN_WORD_THRESHOLD,
@@ -1483,6 +1581,7 @@ class CrawlerRunConfig:
         self.screenshot = screenshot
         self.screenshot_wait_for = screenshot_wait_for
         self.screenshot_height_threshold = screenshot_height_threshold
+        self.force_viewport_screenshot = force_viewport_screenshot
         self.pdf = pdf
         self.capture_mhtml = capture_mhtml
         self.image_description_min_word_threshold = image_description_min_word_threshold

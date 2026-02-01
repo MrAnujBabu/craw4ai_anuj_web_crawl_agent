@@ -1,5 +1,6 @@
 from .__version__ import __version__ as crawl4ai_version
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -673,11 +674,17 @@ class AsyncWebCrawler:
         # if not config.content_filter and not markdown_generator.content_filter:
         #     markdown_generator.content_filter = PruningContentFilter()
 
+        # Extract <base href> from raw HTML before it gets stripped by cleaning.
+        # This ensures relative URLs resolve correctly even with cleaned_html.
+        base_url = params.get("base_url") or params.get("redirected_url") or url
+        base_tag_match = re.search(r'<base\s[^>]*href\s*=\s*["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if base_tag_match:
+            base_url = base_tag_match.group(1)
+
         markdown_result: MarkdownGenerationResult = (
             markdown_generator.generate_markdown(
                 input_html=markdown_input_html,
-                # Use explicit base_url if provided (for raw: HTML), otherwise redirected_url, then url
-                base_url=params.get("base_url") or params.get("redirected_url") or url
+                base_url=base_url
                 # html2text_options=kwargs.get('html2text', {})
             )
         )

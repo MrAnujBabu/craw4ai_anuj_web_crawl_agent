@@ -400,17 +400,19 @@ class AsyncUrlSeeder:
         if self.logger and hasattr(self.logger, 'verbose') and config.verbose is not None:
             self.logger.verbose = config.verbose
 
-        # ensure we have the latest CC collection id
-        if self.index_id is None:
-            self.index_id = await self._latest_index()
-
         # Parse source parameter - split by '+' to get list of sources
-        sources = source.split('+')
+        sources = [s.strip().lower() for s in source.split("+") if s.strip()]
+
         valid_sources = {"cc", "sitemap"}
         for s in sources:
             if s not in valid_sources:
                 raise ValueError(
                     f"Invalid source '{s}'. Valid sources are: {', '.join(valid_sources)}")
+
+            # ensure we have the latest CC collection id when the source is cc
+            if s == "cc" and self.index_id is None:
+                self.index_id = await self._latest_index()
+
 
         if hits_per_sec:
             if hits_per_sec <= 0:
