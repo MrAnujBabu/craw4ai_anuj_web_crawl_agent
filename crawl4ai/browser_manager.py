@@ -88,7 +88,16 @@ class ManagedBrowser:
             "--force-color-profile=srgb",
             "--mute-audio",
             "--disable-background-timer-throttling",
+            # Memory-saving flags: disable unused Chrome features
+            "--disable-features=OptimizationHints,MediaRouter,DialMediaRouteProvider",
+            "--disable-component-update",
+            "--disable-domain-reliability",
         ]
+        if config.memory_saving_mode:
+            flags.extend([
+                "--aggressive-cache-discard",
+                '--js-flags=--max-old-space-size=512',
+            ])
         if config.light_mode:
             flags.extend(BROWSER_DISABLE_OPTIONS)
         if config.text_mode:
@@ -725,6 +734,13 @@ class BrowserManager:
         # Browser endpoint key for global page tracking (set after browser starts)
         self._browser_endpoint_key: Optional[str] = None
 
+        # Browser recycling state
+        self._pages_served = 0
+        self._recycling = False
+        self._recycle_lock = asyncio.Lock()
+        self._recycle_done = asyncio.Event()
+        self._recycle_done.set()  # starts "open" — not recycling
+
         # Stealth adapter for stealth mode
         self._stealth_adapter = None
         if self.config.enable_stealth and not self.use_undetected:
@@ -972,9 +988,19 @@ class BrowserManager:
             "--force-color-profile=srgb",
             "--mute-audio",
             "--disable-background-timer-throttling",
+            # Memory-saving flags: disable unused Chrome features
+            "--disable-features=OptimizationHints,MediaRouter,DialMediaRouteProvider",
+            "--disable-component-update",
+            "--disable-domain-reliability",
             # "--single-process",
             f"--window-size={self.config.viewport_width},{self.config.viewport_height}",
         ]
+
+        if self.config.memory_saving_mode:
+            args.extend([
+                "--aggressive-cache-discard",
+                '--js-flags=--max-old-space-size=512',
+            ])
 
         if self.config.light_mode:
             args.extend(BROWSER_DISABLE_OPTIONS)
@@ -1408,6 +1434,9 @@ class BrowserManager:
         Returns:
             (page, context): The Page and its BrowserContext
         """
+        # Block if browser is being recycled; wakes instantly when done
+        await self._recycle_done.wait()
+
         self._cleanup_expired_sessions()
 
         # If a session_id is provided and we already have it, reuse that page + context
@@ -1567,6 +1596,7 @@ class BrowserManager:
         if crawlerRunConfig.session_id:
             self.sessions[crawlerRunConfig.session_id] = (context, page, time.time())
 
+        self._pages_served += 1
         return page, context
 
     async def kill_session(self, session_id: str):
@@ -1580,14 +1610,23 @@ class BrowserManager:
             context, page, _ = self.sessions[session_id]
             self._release_page_from_use(page)
             # Decrement context refcount for the session's page
+            should_close_context = False
             async with self._contexts_lock:
                 sig = self._page_to_sig.pop(page, None)
                 if sig is not None and sig in self._context_refcounts:
                     self._context_refcounts[sig] = max(
                         0, self._context_refcounts[sig] - 1
                     )
+                    # Only close the context if no other pages are using it
+                    # (refcount dropped to 0) AND we own the context (not managed)
+                    if not self.config.use_managed_browser:
+                        if self._context_refcounts.get(sig, 0) == 0:
+                            self.contexts_by_config.pop(sig, None)
+                            self._context_refcounts.pop(sig, None)
+                            self._context_last_used.pop(sig, None)
+                            should_close_context = True
             await page.close()
-            if not self.config.use_managed_browser:
+            if should_close_context:
                 await context.close()
             del self.sessions[session_id]
 
@@ -1612,6 +1651,89 @@ class BrowserManager:
                 self._context_refcounts[sig] = max(
                     0, self._context_refcounts[sig] - 1
                 )
+
+        # Check if browser recycle is needed
+        if self._should_recycle():
+            await self._maybe_recycle_browser()
+
+    def _should_recycle(self) -> bool:
+        """Check if page threshold reached for browser recycling."""
+        limit = self.config.max_pages_before_recycle
+        if limit <= 0:
+            return False
+        return self._pages_served >= limit
+
+    async def _maybe_recycle_browser(self):
+        """Recycle browser if no active crawls are in-flight.
+
+        Uses asyncio.Event to block new get_page() callers during recycle,
+        and sets _recycling inside _contexts_lock to prevent race conditions.
+        """
+        if self._recycling:
+            return
+
+        async with self._recycle_lock:
+            if self._recycling:
+                return
+
+            # Set _recycling and check refcounts under the SAME lock
+            # to prevent a new crawl slipping in between check and flag set
+            async with self._contexts_lock:
+                total_active = sum(self._context_refcounts.values())
+                if total_active > 0:
+                    return  # active crawls running, next release will re-check
+                self._recycling = True
+                self._recycle_done.clear()  # block new get_page() callers
+
+            try:
+                if self.logger:
+                    self.logger.info(
+                        message="Recycling browser after {count} pages to reclaim memory",
+                        tag="BROWSER",
+                        params={"count": self._pages_served},
+                    )
+
+                # Force full cleanup to kill the browser process and reclaim
+                # memory. For external CDP (cdp_url without cache), temporarily
+                # enable cdp_cleanup_on_close so close() actually disconnects.
+                # For cached CDP, close() already handles release correctly.
+                saved_cdp_cleanup = self.config.cdp_cleanup_on_close
+                if self.config.cdp_url and not self._using_cached_cdp:
+                    self.config.cdp_cleanup_on_close = True
+                try:
+                    await self.close()
+                finally:
+                    self.config.cdp_cleanup_on_close = saved_cdp_cleanup
+
+                # close() already clears most tracking dicts, but ensure
+                # everything is reset for the fresh browser
+                self.contexts_by_config.clear()
+                self._context_refcounts.clear()
+                self._context_last_used.clear()
+                self._page_to_sig.clear()
+                self.sessions.clear()
+                # Clear global page tracking for this endpoint — old pages are dead
+                if self._browser_endpoint_key and self._browser_endpoint_key in BrowserManager._global_pages_in_use:
+                    BrowserManager._global_pages_in_use[self._browser_endpoint_key].clear()
+
+                # Re-create ManagedBrowser if needed — close() sets it to None,
+                # but start() expects it to exist for the managed browser path.
+                if self.config.use_managed_browser and self.managed_browser is None:
+                    self.managed_browser = ManagedBrowser(
+                        browser_type=self.config.browser_type,
+                        user_data_dir=self.config.user_data_dir,
+                        headless=self.config.headless,
+                        logger=self.logger,
+                        debugging_port=self.config.debugging_port,
+                        cdp_url=self.config.cdp_url,
+                        browser_config=self.config,
+                    )
+
+                await self.start()
+                self._pages_served = 0
+            finally:
+                self._recycling = False
+                self._recycle_done.set()  # wake ALL waiting get_page() callers
 
     def _cleanup_expired_sessions(self):
         """Clean up expired sessions based on TTL."""

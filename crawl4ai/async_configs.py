@@ -562,6 +562,14 @@ class BrowserConfig:
                            Default: [].
         enable_stealth (bool): If True, applies playwright-stealth to bypass basic bot detection.
                               Cannot be used with use_undetected browser mode. Default: False.
+        memory_saving_mode (bool): If True, adds aggressive cache discard and V8 heap cap flags
+                                   to reduce Chromium memory growth. Recommended for high-volume
+                                   crawling (1000+ pages). May slightly reduce performance due to
+                                   cache eviction. Default: False.
+        max_pages_before_recycle (int): Number of pages to crawl before recycling the browser
+                                        process to reclaim leaked memory. 0 = disabled.
+                                        Recommended: 500-1000 for long-running crawlers.
+                                        Default: 0.
     """
 
     def __init__(
@@ -610,6 +618,8 @@ class BrowserConfig:
         host: str = "localhost",
         enable_stealth: bool = False,
         init_scripts: List[str] = None,
+        memory_saving_mode: bool = False,
+        max_pages_before_recycle: int = 0,
     ):
         
         self.browser_type = browser_type
@@ -672,6 +682,8 @@ class BrowserConfig:
         self.host = host
         self.enable_stealth = enable_stealth
         self.init_scripts = init_scripts if init_scripts is not None else []
+        self.memory_saving_mode = memory_saving_mode
+        self.max_pages_before_recycle = max_pages_before_recycle
 
         fa_user_agenr_generator = ValidUAGenerator()
         if self.user_agent_mode == "random":
@@ -752,6 +764,8 @@ class BrowserConfig:
             host=kwargs.get("host", "localhost"),
             enable_stealth=kwargs.get("enable_stealth", False),
             init_scripts=kwargs.get("init_scripts", []),
+            memory_saving_mode=kwargs.get("memory_saving_mode", False),
+            max_pages_before_recycle=kwargs.get("max_pages_before_recycle", 0),
         )
 
     def to_dict(self):
@@ -792,6 +806,8 @@ class BrowserConfig:
             "host": self.host,
             "enable_stealth": self.enable_stealth,
             "init_scripts": self.init_scripts,
+            "memory_saving_mode": self.memory_saving_mode,
+            "max_pages_before_recycle": self.max_pages_before_recycle,
         }
 
 

@@ -881,6 +881,7 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
                             "scale": scale,
                         },
                     )
+                    await cdp.detach()
                 except Exception as e:
                     self.logger.warning(
                         message="Failed to adjust viewport to content: {error}",
