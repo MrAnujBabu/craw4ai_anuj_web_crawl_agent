@@ -734,12 +734,14 @@ class BrowserManager:
         # Browser endpoint key for global page tracking (set after browser starts)
         self._browser_endpoint_key: Optional[str] = None
 
-        # Browser recycling state
+        # Browser recycling state (version-based approach)
         self._pages_served = 0
-        self._recycling = False
-        self._recycle_lock = asyncio.Lock()
-        self._recycle_done = asyncio.Event()
-        self._recycle_done.set()  # starts "open" — not recycling
+        self._browser_version = 1  # included in signature, bump to create new browser
+        self._pending_cleanup = {}  # old_sig -> {"browser": browser, "contexts": [...], "done": Event}
+        self._pending_cleanup_lock = asyncio.Lock()
+        self._max_pending_browsers = 3  # safety cap — block if too many draining
+        self._cleanup_slot_available = asyncio.Event()
+        self._cleanup_slot_available.set()  # starts open
 
         # Stealth adapter for stealth mode
         self._stealth_adapter = None
@@ -1318,6 +1320,9 @@ class BrowserManager:
         sig_dict["simulate_user"] = crawlerRunConfig.simulate_user
         sig_dict["magic"] = crawlerRunConfig.magic
 
+        # Browser version — bumped on recycle to force new browser instance
+        sig_dict["_browser_version"] = self._browser_version
+
         signature_json = json.dumps(sig_dict, sort_keys=True, default=str)
         return hashlib.sha256(signature_json.encode("utf-8")).hexdigest()
 
@@ -1434,9 +1439,6 @@ class BrowserManager:
         Returns:
             (page, context): The Page and its BrowserContext
         """
-        # Block if browser is being recycled; wakes instantly when done
-        await self._recycle_done.wait()
-
         self._cleanup_expired_sessions()
 
         # If a session_id is provided and we already have it, reuse that page + context
@@ -1597,6 +1599,11 @@ class BrowserManager:
             self.sessions[crawlerRunConfig.session_id] = (context, page, time.time())
 
         self._pages_served += 1
+
+        # Check if browser recycle threshold is hit — bump version for next requests
+        # This happens AFTER incrementing counter so concurrent requests see correct count
+        await self._maybe_bump_browser_version()
+
         return page, context
 
     async def kill_session(self, session_id: str):
@@ -1645,16 +1652,19 @@ class BrowserManager:
         release_page() so the context lifecycle is properly tracked.
         """
         self._release_page_from_use(page)
+        sig = None
+        refcount = -1
         async with self._contexts_lock:
             sig = self._page_to_sig.pop(page, None)
             if sig is not None and sig in self._context_refcounts:
                 self._context_refcounts[sig] = max(
                     0, self._context_refcounts[sig] - 1
                 )
+                refcount = self._context_refcounts[sig]
 
-        # Check if browser recycle is needed
-        if self._should_recycle():
-            await self._maybe_recycle_browser()
+        # Check if this signature belongs to an old browser waiting to be cleaned up
+        if sig is not None and refcount == 0:
+            await self._maybe_cleanup_old_browser(sig)
 
     def _should_recycle(self) -> bool:
         """Check if page threshold reached for browser recycling."""
@@ -1663,77 +1673,113 @@ class BrowserManager:
             return False
         return self._pages_served >= limit
 
-    async def _maybe_recycle_browser(self):
-        """Recycle browser if no active crawls are in-flight.
+    async def _maybe_bump_browser_version(self):
+        """Bump browser version if threshold reached, moving old browser to pending cleanup.
 
-        Uses asyncio.Event to block new get_page() callers during recycle,
-        and sets _recycling inside _contexts_lock to prevent race conditions.
+        New requests automatically get a new browser (via new signature).
+        Old browser drains naturally and gets cleaned up when refcount hits 0.
         """
-        if self._recycling:
+        if not self._should_recycle():
             return
 
-        async with self._recycle_lock:
-            if self._recycling:
-                return
+        # Safety cap: wait if too many old browsers are draining
+        while True:
+            async with self._pending_cleanup_lock:
+                # Re-check threshold under lock (another request may have bumped already)
+                if not self._should_recycle():
+                    return
 
-            # Set _recycling and check refcounts under the SAME lock
-            # to prevent a new crawl slipping in between check and flag set
+                # Check safety cap
+                if len(self._pending_cleanup) >= self._max_pending_browsers:
+                    if self.logger:
+                        self.logger.debug(
+                            message="Waiting for old browser to drain (pending: {count})",
+                            tag="BROWSER",
+                            params={"count": len(self._pending_cleanup)},
+                        )
+                    self._cleanup_slot_available.clear()
+                    # Release lock and wait
+                else:
+                    # We have a slot — do the bump inside this lock hold
+                    old_version = self._browser_version
+                    old_sigs = []
+                    async with self._contexts_lock:
+                        for sig in list(self._context_refcounts.keys()):
+                            old_sigs.append(sig)
+
+                    if self.logger:
+                        self.logger.info(
+                            message="Bumping browser version {old} -> {new} after {count} pages",
+                            tag="BROWSER",
+                            params={
+                                "old": old_version,
+                                "new": old_version + 1,
+                                "count": self._pages_served,
+                            },
+                        )
+
+                    # Mark old signatures for cleanup when their refcount hits 0
+                    done_event = asyncio.Event()
+                    for sig in old_sigs:
+                        self._pending_cleanup[sig] = {
+                            "version": old_version,
+                            "done": done_event,
+                        }
+
+                    # Bump version — new get_page() calls will create new contexts
+                    self._browser_version += 1
+                    self._pages_served = 0
+                    return  # Done!
+
+            # If we get here, we need to wait for a cleanup slot
+            await self._cleanup_slot_available.wait()
+
+    async def _maybe_cleanup_old_browser(self, sig: str):
+        """Clean up an old browser's context if its refcount hit 0 and it's pending cleanup."""
+        async with self._pending_cleanup_lock:
+            if sig not in self._pending_cleanup:
+                return  # Not an old browser signature
+
+            cleanup_info = self._pending_cleanup.pop(sig)
+            old_version = cleanup_info["version"]
+
+            if self.logger:
+                self.logger.debug(
+                    message="Cleaning up context from browser version {version} (sig: {sig})",
+                    tag="BROWSER",
+                    params={"version": old_version, "sig": sig[:12]},
+                )
+
+            # Remove context from tracking
             async with self._contexts_lock:
-                total_active = sum(self._context_refcounts.values())
-                if total_active > 0:
-                    return  # active crawls running, next release will re-check
-                self._recycling = True
-                self._recycle_done.clear()  # block new get_page() callers
+                context = self.contexts_by_config.pop(sig, None)
+                self._context_refcounts.pop(sig, None)
+                self._context_last_used.pop(sig, None)
 
-            try:
+            # Close context outside locks
+            if context is not None:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+
+            # Check if any signatures from this old version remain
+            remaining_old = [
+                s for s, info in self._pending_cleanup.items()
+                if info["version"] == old_version
+            ]
+
+            if not remaining_old:
                 if self.logger:
                     self.logger.info(
-                        message="Recycling browser after {count} pages to reclaim memory",
+                        message="All contexts from browser version {version} cleaned up",
                         tag="BROWSER",
-                        params={"count": self._pages_served},
+                        params={"version": old_version},
                     )
 
-                # Force full cleanup to kill the browser process and reclaim
-                # memory. For external CDP (cdp_url without cache), temporarily
-                # enable cdp_cleanup_on_close so close() actually disconnects.
-                # For cached CDP, close() already handles release correctly.
-                saved_cdp_cleanup = self.config.cdp_cleanup_on_close
-                if self.config.cdp_url and not self._using_cached_cdp:
-                    self.config.cdp_cleanup_on_close = True
-                try:
-                    await self.close()
-                finally:
-                    self.config.cdp_cleanup_on_close = saved_cdp_cleanup
-
-                # close() already clears most tracking dicts, but ensure
-                # everything is reset for the fresh browser
-                self.contexts_by_config.clear()
-                self._context_refcounts.clear()
-                self._context_last_used.clear()
-                self._page_to_sig.clear()
-                self.sessions.clear()
-                # Clear global page tracking for this endpoint — old pages are dead
-                if self._browser_endpoint_key and self._browser_endpoint_key in BrowserManager._global_pages_in_use:
-                    BrowserManager._global_pages_in_use[self._browser_endpoint_key].clear()
-
-                # Re-create ManagedBrowser if needed — close() sets it to None,
-                # but start() expects it to exist for the managed browser path.
-                if self.config.use_managed_browser and self.managed_browser is None:
-                    self.managed_browser = ManagedBrowser(
-                        browser_type=self.config.browser_type,
-                        user_data_dir=self.config.user_data_dir,
-                        headless=self.config.headless,
-                        logger=self.logger,
-                        debugging_port=self.config.debugging_port,
-                        cdp_url=self.config.cdp_url,
-                        browser_config=self.config,
-                    )
-
-                await self.start()
-                self._pages_served = 0
-            finally:
-                self._recycling = False
-                self._recycle_done.set()  # wake ALL waiting get_page() callers
+            # Open a cleanup slot if we're below the cap
+            if len(self._pending_cleanup) < self._max_pending_browsers:
+                self._cleanup_slot_available.set()
 
     def _cleanup_expired_sessions(self):
         """Clean up expired sessions based on TTL."""
