@@ -69,6 +69,10 @@ nav:
     - "Strategies": "api/strategies.md"
     - "C4A-Script Reference": "api/c4a-script-reference.md"
   - "Brand Book": "branding/index.md"
+  - Community:
+    - "Contributing Guide": "CONTRIBUTING.md"
+    - "Code of Conduct": "https://github.com/unclecode/crawl4ai/blob/main/CODE_OF_CONDUCT.md"
+    - "Contributors": "https://github.com/unclecode/crawl4ai/blob/main/CONTRIBUTORS.md"
 
 theme:
   name: 'terminal'

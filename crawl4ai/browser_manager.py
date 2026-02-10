@@ -88,7 +88,16 @@ class ManagedBrowser:
             "--force-color-profile=srgb",
             "--mute-audio",
             "--disable-background-timer-throttling",
+            # Memory-saving flags: disable unused Chrome features
+            "--disable-features=OptimizationHints,MediaRouter,DialMediaRouteProvider",
+            "--disable-component-update",
+            "--disable-domain-reliability",
         ]
+        if config.memory_saving_mode:
+            flags.extend([
+                "--aggressive-cache-discard",
+                '--js-flags=--max-old-space-size=512',
+            ])
         if config.light_mode:
             flags.extend(BROWSER_DISABLE_OPTIONS)
         if config.text_mode:
@@ -710,7 +719,13 @@ class BrowserManager:
         # Keep track of contexts by a "config signature," so each unique config reuses a single context
         self.contexts_by_config = {}
         self._contexts_lock = asyncio.Lock()
-        
+
+        # Context lifecycle tracking for LRU eviction
+        self._context_refcounts = {}    # sig -> int  (active crawls using this context)
+        self._context_last_used = {}    # sig -> float (monotonic timestamp for LRU)
+        self._page_to_sig = {}          # page -> sig  (for decrement lookup on release)
+        self._max_contexts = 20         # LRU eviction threshold
+
         # Serialize context.new_page() across concurrent tasks to avoid races
         # when using a shared persistent context (context.pages may be empty
         # for all racers). Prevents 'Target page/context closed' errors.
@@ -718,6 +733,15 @@ class BrowserManager:
 
         # Browser endpoint key for global page tracking (set after browser starts)
         self._browser_endpoint_key: Optional[str] = None
+
+        # Browser recycling state (version-based approach)
+        self._pages_served = 0
+        self._browser_version = 1  # included in signature, bump to create new browser
+        self._pending_cleanup = {}  # old_sig -> {"browser": browser, "contexts": [...], "done": Event}
+        self._pending_cleanup_lock = asyncio.Lock()
+        self._max_pending_browsers = 3  # safety cap — block if too many draining
+        self._cleanup_slot_available = asyncio.Event()
+        self._cleanup_slot_available.set()  # starts open
 
         # Stealth adapter for stealth mode
         self._stealth_adapter = None
@@ -966,9 +990,19 @@ class BrowserManager:
             "--force-color-profile=srgb",
             "--mute-audio",
             "--disable-background-timer-throttling",
+            # Memory-saving flags: disable unused Chrome features
+            "--disable-features=OptimizationHints,MediaRouter,DialMediaRouteProvider",
+            "--disable-component-update",
+            "--disable-domain-reliability",
             # "--single-process",
             f"--window-size={self.config.viewport_width},{self.config.viewport_height}",
         ]
+
+        if self.config.memory_saving_mode:
+            args.extend([
+                "--aggressive-cache-discard",
+                '--js-flags=--max-old-space-size=512',
+            ])
 
         if self.config.light_mode:
             args.extend(BROWSER_DISABLE_OPTIONS)
@@ -1195,21 +1229,19 @@ class BrowserManager:
             "accept_downloads": self.config.accept_downloads,
             "storage_state": self.config.storage_state,
             "ignore_https_errors": self.config.ignore_https_errors,
-            "device_scale_factor": 1.0,
+            "device_scale_factor": self.config.device_scale_factor,
             "java_script_enabled": self.config.java_script_enabled,
         }
         
         if crawlerRunConfig:
             # Check if there is value for crawlerRunConfig.proxy_config set add that to context
             if crawlerRunConfig.proxy_config:
-                proxy_settings = {
-                    "server": crawlerRunConfig.proxy_config.server,
-                }
-                if crawlerRunConfig.proxy_config.username:
-                    proxy_settings.update({
-                        "username": crawlerRunConfig.proxy_config.username,
-                        "password": crawlerRunConfig.proxy_config.password,
-                    })
+                from playwright.async_api import ProxySettings
+                proxy_settings = ProxySettings(
+                    server=crawlerRunConfig.proxy_config.server,
+                    username=crawlerRunConfig.proxy_config.username,
+                    password=crawlerRunConfig.proxy_config.password,
+                )
                 context_settings["proxy"] = proxy_settings
 
         if self.config.text_mode:
@@ -1249,39 +1281,84 @@ class BrowserManager:
 
     def _make_config_signature(self, crawlerRunConfig: CrawlerRunConfig) -> str:
         """
-        Converts the crawlerRunConfig into a dict, excludes ephemeral fields,
-        then returns a hash of the sorted JSON. This yields a stable signature
-        that identifies configurations requiring a unique browser context.
+        Hash ONLY the CrawlerRunConfig fields that affect browser context
+        creation (create_browser_context) or context setup (setup_context).
+
+        Whitelist approach: fields like css_selector, word_count_threshold,
+        screenshot, verbose, etc. do NOT cause a new context to be created.
         """
         import json
 
-        config_dict = crawlerRunConfig.__dict__.copy()
-        # Exclude items that do not affect browser-level setup.
-        # Expand or adjust as needed, e.g. chunking_strategy is purely for data extraction, not for browser config.
-        ephemeral_keys = [
-            "session_id",
-            "js_code",
-            "scraping_strategy",
-            "extraction_strategy",
-            "chunking_strategy",
-            "cache_mode",
-            "content_filter",
-            "semaphore_count",
-            "url"
-        ]
-        
-        # Do NOT exclude locale, timezone_id, or geolocation as these DO affect browser context
-        # and should cause a new context to be created if they change
-        
-        for key in ephemeral_keys:
-            if key in config_dict:
-                del config_dict[key]
-        # Convert to canonical JSON string
-        signature_json = json.dumps(config_dict, sort_keys=True, default=str)
+        sig_dict = {}
 
-        # Hash the JSON so we get a compact, unique string
-        signature_hash = hashlib.sha256(signature_json.encode("utf-8")).hexdigest()
-        return signature_hash
+        # Fields that flow into create_browser_context()
+        pc = crawlerRunConfig.proxy_config
+        if pc is not None:
+            sig_dict["proxy_config"] = {
+                "server": getattr(pc, "server", None),
+                "username": getattr(pc, "username", None),
+                "password": getattr(pc, "password", None),
+            }
+        else:
+            sig_dict["proxy_config"] = None
+
+        sig_dict["locale"] = crawlerRunConfig.locale
+        sig_dict["timezone_id"] = crawlerRunConfig.timezone_id
+
+        geo = crawlerRunConfig.geolocation
+        if geo is not None:
+            sig_dict["geolocation"] = {
+                "latitude": geo.latitude,
+                "longitude": geo.longitude,
+                "accuracy": geo.accuracy,
+            }
+        else:
+            sig_dict["geolocation"] = None
+
+        # Fields that flow into setup_context() as init scripts
+        sig_dict["override_navigator"] = crawlerRunConfig.override_navigator
+        sig_dict["simulate_user"] = crawlerRunConfig.simulate_user
+        sig_dict["magic"] = crawlerRunConfig.magic
+
+        # Browser version — bumped on recycle to force new browser instance
+        sig_dict["_browser_version"] = self._browser_version
+
+        signature_json = json.dumps(sig_dict, sort_keys=True, default=str)
+        return hashlib.sha256(signature_json.encode("utf-8")).hexdigest()
+
+    def _evict_lru_context_locked(self):
+        """
+        If contexts exceed the limit, find the least-recently-used context
+        with zero active crawls and remove it from all tracking dicts.
+
+        MUST be called while holding self._contexts_lock.
+
+        Returns the BrowserContext to close (caller closes it OUTSIDE the
+        lock), or None if no eviction is needed or possible.
+        """
+        if len(self.contexts_by_config) <= self._max_contexts:
+            return None
+
+        # Sort candidates by last-used timestamp (oldest first)
+        candidates = sorted(
+            self._context_last_used.items(),
+            key=lambda item: item[1],
+        )
+        for evict_sig, _ in candidates:
+            if self._context_refcounts.get(evict_sig, 0) == 0:
+                ctx = self.contexts_by_config.pop(evict_sig, None)
+                self._context_refcounts.pop(evict_sig, None)
+                self._context_last_used.pop(evict_sig, None)
+                # Clean up stale page->sig mappings for evicted context
+                stale_pages = [
+                    p for p, s in self._page_to_sig.items() if s == evict_sig
+                ]
+                for p in stale_pages:
+                    del self._page_to_sig[p]
+                return ctx
+
+        # All contexts are in active use — cannot evict
+        return None
 
     async def _apply_stealth_to_page(self, page):
         """Apply stealth to a page if stealth mode is enabled"""
@@ -1379,6 +1456,7 @@ class BrowserManager:
             # context reuse for multiple URLs with the same config (e.g., batch/deep crawls).
             if self.config.create_isolated_context:
                 config_signature = self._make_config_signature(crawlerRunConfig)
+                to_close = None
 
                 async with self._contexts_lock:
                     if config_signature in self.contexts_by_config:
@@ -1387,14 +1465,44 @@ class BrowserManager:
                         context = await self.create_browser_context(crawlerRunConfig)
                         await self.setup_context(context, crawlerRunConfig)
                         self.contexts_by_config[config_signature] = context
+                        self._context_refcounts[config_signature] = 0
+                        to_close = self._evict_lru_context_locked()
+
+                    # Increment refcount INSIDE lock before releasing
+                    self._context_refcounts[config_signature] = (
+                        self._context_refcounts.get(config_signature, 0) + 1
+                    )
+                    self._context_last_used[config_signature] = time.monotonic()
+
+                # Close evicted context OUTSIDE lock
+                if to_close is not None:
+                    try:
+                        await to_close.close()
+                    except Exception:
+                        pass
 
                 # Always create a new page for each crawl (isolation for navigation)
-                page = await context.new_page()
+                try:
+                    page = await context.new_page()
+                except Exception:
+                    async with self._contexts_lock:
+                        if config_signature in self._context_refcounts:
+                            self._context_refcounts[config_signature] = max(
+                                0, self._context_refcounts[config_signature] - 1
+                            )
+                    raise
                 await self._apply_stealth_to_page(page)
+                self._page_to_sig[page] = config_signature
             elif self.config.storage_state:
-                context = await self.create_browser_context(crawlerRunConfig)
+                tmp_context = await self.create_browser_context(crawlerRunConfig)
                 ctx = self.default_context        # default context, one window only
-                ctx = await clone_runtime_state(context, ctx, crawlerRunConfig, self.config)
+                ctx = await clone_runtime_state(tmp_context, ctx, crawlerRunConfig, self.config)
+                # Close the temporary context — only needed as a clone source
+                try:
+                    await tmp_context.close()
+                except Exception:
+                    pass
+                context = ctx  # so (page, context) return value is correct
                 # Avoid concurrent new_page on shared persistent context
                 # See GH-1198: context.pages can be empty under races
                 async with self._page_lock:
@@ -1447,6 +1555,7 @@ class BrowserManager:
         else:
             # Otherwise, check if we have an existing context for this config
             config_signature = self._make_config_signature(crawlerRunConfig)
+            to_close = None
 
             async with self._contexts_lock:
                 if config_signature in self.contexts_by_config:
@@ -1456,14 +1565,44 @@ class BrowserManager:
                     context = await self.create_browser_context(crawlerRunConfig)
                     await self.setup_context(context, crawlerRunConfig)
                     self.contexts_by_config[config_signature] = context
+                    self._context_refcounts[config_signature] = 0
+                    to_close = self._evict_lru_context_locked()
+
+                # Increment refcount INSIDE lock before releasing
+                self._context_refcounts[config_signature] = (
+                    self._context_refcounts.get(config_signature, 0) + 1
+                )
+                self._context_last_used[config_signature] = time.monotonic()
+
+            # Close evicted context OUTSIDE lock
+            if to_close is not None:
+                try:
+                    await to_close.close()
+                except Exception:
+                    pass
 
             # Create a new page from the chosen context
-            page = await context.new_page()
+            try:
+                page = await context.new_page()
+            except Exception:
+                async with self._contexts_lock:
+                    if config_signature in self._context_refcounts:
+                        self._context_refcounts[config_signature] = max(
+                            0, self._context_refcounts[config_signature] - 1
+                        )
+                raise
             await self._apply_stealth_to_page(page)
+            self._page_to_sig[page] = config_signature
 
         # If a session_id is specified, store this session so we can reuse later
         if crawlerRunConfig.session_id:
             self.sessions[crawlerRunConfig.session_id] = (context, page, time.time())
+
+        self._pages_served += 1
+
+        # Check if browser recycle threshold is hit — bump version for next requests
+        # This happens AFTER incrementing counter so concurrent requests see correct count
+        await self._maybe_bump_browser_version()
 
         return page, context
 
@@ -1477,22 +1616,170 @@ class BrowserManager:
         if session_id in self.sessions:
             context, page, _ = self.sessions[session_id]
             self._release_page_from_use(page)
+            # Decrement context refcount for the session's page
+            should_close_context = False
+            async with self._contexts_lock:
+                sig = self._page_to_sig.pop(page, None)
+                if sig is not None and sig in self._context_refcounts:
+                    self._context_refcounts[sig] = max(
+                        0, self._context_refcounts[sig] - 1
+                    )
+                    # Only close the context if no other pages are using it
+                    # (refcount dropped to 0) AND we own the context (not managed)
+                    if not self.config.use_managed_browser:
+                        if self._context_refcounts.get(sig, 0) == 0:
+                            self.contexts_by_config.pop(sig, None)
+                            self._context_refcounts.pop(sig, None)
+                            self._context_last_used.pop(sig, None)
+                            should_close_context = True
             await page.close()
-            if not self.config.use_managed_browser:
+            if should_close_context:
                 await context.close()
             del self.sessions[session_id]
 
     def release_page(self, page):
         """
         Release a page from the in-use tracking set (global tracking).
-
-        This should be called when a crawl operation completes to allow
-        the page to be reused by subsequent crawls.
-
-        Args:
-            page: The Playwright page to release.
+        Sync variant — does NOT decrement context refcount.
         """
         self._release_page_from_use(page)
+
+    async def release_page_with_context(self, page):
+        """
+        Release a page and decrement its context's refcount under the lock.
+
+        Should be called from the async crawl finally block instead of
+        release_page() so the context lifecycle is properly tracked.
+        """
+        self._release_page_from_use(page)
+        sig = None
+        refcount = -1
+        async with self._contexts_lock:
+            sig = self._page_to_sig.pop(page, None)
+            if sig is not None and sig in self._context_refcounts:
+                self._context_refcounts[sig] = max(
+                    0, self._context_refcounts[sig] - 1
+                )
+                refcount = self._context_refcounts[sig]
+
+        # Check if this signature belongs to an old browser waiting to be cleaned up
+        if sig is not None and refcount == 0:
+            await self._maybe_cleanup_old_browser(sig)
+
+    def _should_recycle(self) -> bool:
+        """Check if page threshold reached for browser recycling."""
+        limit = self.config.max_pages_before_recycle
+        if limit <= 0:
+            return False
+        return self._pages_served >= limit
+
+    async def _maybe_bump_browser_version(self):
+        """Bump browser version if threshold reached, moving old browser to pending cleanup.
+
+        New requests automatically get a new browser (via new signature).
+        Old browser drains naturally and gets cleaned up when refcount hits 0.
+        """
+        if not self._should_recycle():
+            return
+
+        # Safety cap: wait if too many old browsers are draining
+        while True:
+            async with self._pending_cleanup_lock:
+                # Re-check threshold under lock (another request may have bumped already)
+                if not self._should_recycle():
+                    return
+
+                # Check safety cap
+                if len(self._pending_cleanup) >= self._max_pending_browsers:
+                    if self.logger:
+                        self.logger.debug(
+                            message="Waiting for old browser to drain (pending: {count})",
+                            tag="BROWSER",
+                            params={"count": len(self._pending_cleanup)},
+                        )
+                    self._cleanup_slot_available.clear()
+                    # Release lock and wait
+                else:
+                    # We have a slot — do the bump inside this lock hold
+                    old_version = self._browser_version
+                    old_sigs = []
+                    async with self._contexts_lock:
+                        for sig in list(self._context_refcounts.keys()):
+                            old_sigs.append(sig)
+
+                    if self.logger:
+                        self.logger.info(
+                            message="Bumping browser version {old} -> {new} after {count} pages",
+                            tag="BROWSER",
+                            params={
+                                "old": old_version,
+                                "new": old_version + 1,
+                                "count": self._pages_served,
+                            },
+                        )
+
+                    # Mark old signatures for cleanup when their refcount hits 0
+                    done_event = asyncio.Event()
+                    for sig in old_sigs:
+                        self._pending_cleanup[sig] = {
+                            "version": old_version,
+                            "done": done_event,
+                        }
+
+                    # Bump version — new get_page() calls will create new contexts
+                    self._browser_version += 1
+                    self._pages_served = 0
+                    return  # Done!
+
+            # If we get here, we need to wait for a cleanup slot
+            await self._cleanup_slot_available.wait()
+
+    async def _maybe_cleanup_old_browser(self, sig: str):
+        """Clean up an old browser's context if its refcount hit 0 and it's pending cleanup."""
+        async with self._pending_cleanup_lock:
+            if sig not in self._pending_cleanup:
+                return  # Not an old browser signature
+
+            cleanup_info = self._pending_cleanup.pop(sig)
+            old_version = cleanup_info["version"]
+
+            if self.logger:
+                self.logger.debug(
+                    message="Cleaning up context from browser version {version} (sig: {sig})",
+                    tag="BROWSER",
+                    params={"version": old_version, "sig": sig[:12]},
+                )
+
+            # Remove context from tracking
+            async with self._contexts_lock:
+                context = self.contexts_by_config.pop(sig, None)
+                self._context_refcounts.pop(sig, None)
+                self._context_last_used.pop(sig, None)
+
+            # Close context outside locks
+            if context is not None:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+
+            # Check if any signatures from this old version remain
+            remaining_old = [
+                s for s, info in self._pending_cleanup.items()
+                if info["version"] == old_version
+            ]
+
+            if not remaining_old:
+                if self.logger:
+                    self.logger.info(
+                        message="All contexts from browser version {version} cleaned up",
+                        tag="BROWSER",
+                        params={"version": old_version},
+                    )
+
+            # Open a cleanup slot if we're below the cap
+            if len(self._pending_cleanup) < self._max_pending_browsers:
+                self._cleanup_slot_available.set()
 
     def _cleanup_expired_sessions(self):
         """Clean up expired sessions based on TTL."""
@@ -1519,6 +1806,9 @@ class BrowserManager:
                 except Exception:
                     pass
             self.contexts_by_config.clear()
+            self._context_refcounts.clear()
+            self._context_last_used.clear()
+            self._page_to_sig.clear()
             await _CDPConnectionCache.release(self.config.cdp_url)
             self.browser = None
             self.playwright = None
@@ -1542,6 +1832,9 @@ class BrowserManager:
                     except Exception:
                         pass
                 self.contexts_by_config.clear()
+                self._context_refcounts.clear()
+                self._context_last_used.clear()
+                self._page_to_sig.clear()
 
                 # Disconnect from browser (doesn't terminate it, just releases connection)
                 if self.browser:
@@ -1583,6 +1876,9 @@ class BrowserManager:
                     params={"error": str(e)}
                 )
         self.contexts_by_config.clear()
+        self._context_refcounts.clear()
+        self._context_last_used.clear()
+        self._page_to_sig.clear()
 
         if self.browser:
             await self.browser.close()

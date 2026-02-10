@@ -541,6 +541,13 @@ class BrowserConfig:
         viewport_height (int): Default viewport height for pages. Default: 600.
         viewport (dict): Default viewport dimensions for pages. If set, overrides viewport_width and viewport_height.
                          Default: None.
+        device_scale_factor (float): The device pixel ratio used for rendering pages. Controls how many
+                                     physical pixels map to one CSS pixel, allowing simulation of HiDPI
+                                     or Retina displays. For example, a viewport of 1920x1080 with a
+                                     device_scale_factor of 2.0 produces screenshots at 3840x2160 resolution.
+                                     Increasing this value improves screenshot quality but may increase
+                                     memory usage and rendering time.
+                                     Default: 1.0.
         verbose (bool): Enable verbose logging.
                         Default: True.
         accept_downloads (bool): Whether to allow file downloads. If True, requires a downloads_path.
@@ -569,6 +576,14 @@ class BrowserConfig:
                            Default: [].
         enable_stealth (bool): If True, applies playwright-stealth to bypass basic bot detection.
                               Cannot be used with use_undetected browser mode. Default: False.
+        memory_saving_mode (bool): If True, adds aggressive cache discard and V8 heap cap flags
+                                   to reduce Chromium memory growth. Recommended for high-volume
+                                   crawling (1000+ pages). May slightly reduce performance due to
+                                   cache eviction. Default: False.
+        max_pages_before_recycle (int): Number of pages to crawl before recycling the browser
+                                        process to reclaim leaked memory. 0 = disabled.
+                                        Recommended: 500-1000 for long-running crawlers.
+                                        Default: 0.
     """
 
     def __init__(
@@ -593,6 +608,7 @@ class BrowserConfig:
         viewport_width: int = 1080,
         viewport_height: int = 600,
         viewport: dict = None,
+        device_scale_factor: float = 1.0,
         accept_downloads: bool = False,
         downloads_path: str = None,
         storage_state: Union[str, dict, None] = None,
@@ -617,6 +633,8 @@ class BrowserConfig:
         host: str = "localhost",
         enable_stealth: bool = False,
         init_scripts: List[str] = None,
+        memory_saving_mode: bool = False,
+        max_pages_before_recycle: int = 0,
     ):
         self.browser_type = browser_type
         self.headless = headless
@@ -665,6 +683,7 @@ class BrowserConfig:
         if self.viewport is not None:
             self.viewport_width = self.viewport.get("width", 1080)
             self.viewport_height = self.viewport.get("height", 600)
+        self.device_scale_factor = device_scale_factor
         self.accept_downloads = accept_downloads
         self.downloads_path = downloads_path
         self.storage_state = storage_state
@@ -684,6 +703,8 @@ class BrowserConfig:
         self.host = host
         self.enable_stealth = enable_stealth
         self.init_scripts = init_scripts if init_scripts is not None else []
+        self.memory_saving_mode = memory_saving_mode
+        self.max_pages_before_recycle = max_pages_before_recycle
 
         fa_user_agenr_generator = ValidUAGenerator()
         if self.user_agent_mode == "random":
@@ -744,9 +765,10 @@ class BrowserConfig:
             chrome_channel=kwargs.get("chrome_channel", "chromium"),
             channel=kwargs.get("channel", "chromium"),
             proxy=kwargs.get("proxy"),
-            proxy_config=kwargs.get("proxy_config", None),
+            proxy_config=ProxyConfig.from_dict(kwargs.get("proxy_config")) if isinstance(kwargs.get("proxy_config"), dict) else kwargs.get("proxy_config", None),
             viewport_width=kwargs.get("viewport_width", 1080),
             viewport_height=kwargs.get("viewport_height", 600),
+            device_scale_factor=kwargs.get("device_scale_factor", 1.0),
             accept_downloads=kwargs.get("accept_downloads", False),
             downloads_path=kwargs.get("downloads_path"),
             storage_state=kwargs.get("storage_state"),
@@ -768,6 +790,8 @@ class BrowserConfig:
             host=kwargs.get("host", "localhost"),
             enable_stealth=kwargs.get("enable_stealth", False),
             init_scripts=kwargs.get("init_scripts", []),
+            memory_saving_mode=kwargs.get("memory_saving_mode", False),
+            max_pages_before_recycle=kwargs.get("max_pages_before_recycle", 0),
         )
 
     def to_dict(self):
@@ -786,9 +810,10 @@ class BrowserConfig:
             "chrome_channel": self.chrome_channel,
             "channel": self.channel,
             "proxy": self.proxy,
-            "proxy_config": self.proxy_config.to_dict() if self.proxy_config else None,
+            "proxy_config": self.proxy_config.to_dict() if hasattr(self.proxy_config, 'to_dict') else self.proxy_config,
             "viewport_width": self.viewport_width,
             "viewport_height": self.viewport_height,
+            "device_scale_factor": self.device_scale_factor,
             "accept_downloads": self.accept_downloads,
             "downloads_path": self.downloads_path,
             "storage_state": self.storage_state,
@@ -808,6 +833,8 @@ class BrowserConfig:
             "host": self.host,
             "enable_stealth": self.enable_stealth,
             "init_scripts": self.init_scripts,
+            "memory_saving_mode": self.memory_saving_mode,
+            "max_pages_before_recycle": self.max_pages_before_recycle,
         }
 
 
@@ -1826,7 +1853,7 @@ class CrawlerRunConfig:
             prettiify=kwargs.get("prettiify", False),
             parser_type=kwargs.get("parser_type", "lxml"),
             scraping_strategy=kwargs.get("scraping_strategy"),
-            proxy_config=kwargs.get("proxy_config"),
+            proxy_config=ProxyConfig.from_dict(kwargs.get("proxy_config")) if isinstance(kwargs.get("proxy_config"), dict) else kwargs.get("proxy_config"),
             proxy_rotation_strategy=kwargs.get("proxy_rotation_strategy"),
             # Sticky Proxy Session Parameters
             proxy_session_id=kwargs.get("proxy_session_id"),
@@ -1958,7 +1985,7 @@ class CrawlerRunConfig:
             "prettiify": self.prettiify,
             "parser_type": self.parser_type,
             "scraping_strategy": self.scraping_strategy,
-            "proxy_config": self.proxy_config,
+            "proxy_config": self.proxy_config.to_dict() if hasattr(self.proxy_config, 'to_dict') else self.proxy_config,
             "proxy_rotation_strategy": self.proxy_rotation_strategy,
             "proxy_session_id": self.proxy_session_id,
             "proxy_session_ttl": self.proxy_session_ttl,

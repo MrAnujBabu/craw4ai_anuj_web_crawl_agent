@@ -39,6 +39,7 @@ class CrawlResult(BaseModel):
     ssl_certificate: Optional[SSLCertificate] = None
     dispatch_result: Optional[DispatchResult] = None
     redirected_url: Optional[str] = None
+    redirected_status_code: Optional[int] = None
     network_requests: Optional[List[Dict[str, Any]]] = None
     console_messages: Optional[List[Dict[str, Any]]] = None
     tables: List[Dict] = Field(default_factory=list)
@@ -73,6 +74,7 @@ class CrawlResult(BaseModel):
 | **ssl_certificate (`Optional[SSLCertificate]`)** | SSL certificate info if `fetch_ssl_certificate=True`.                                               |
 | **dispatch_result (`Optional[DispatchResult]`)** | Additional concurrency and resource usage information when crawling URLs in parallel.               |
 | **redirected_url (`Optional[str]`)**      | The URL after any redirects (different from `url` which is the final URL).                          |
+| **redirected_status_code (`Optional[int]`)** | HTTP status code of the final redirect destination (e.g., 200). `None` for non-HTTP requests (raw HTML, local files). |
 | **network_requests (`Optional[List[Dict[str, Any]]]`)** | List of network requests, responses, and failures captured during the crawl if `capture_network_requests=True`. |
 | **console_messages (`Optional[List[Dict[str, Any]]]`)** | List of browser console messages captured during the crawl if `capture_console_messages=True`.       |
 | **tables (`List[Dict]`)**                 | Table data extracted from HTML tables with structure `[{headers, rows, caption, summary}]`.           |

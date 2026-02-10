@@ -29,6 +29,7 @@ browser_cfg = BrowserConfig(
 | **`viewport_width`**  | `int` (default: `1080`)                | Initial page width (in px). Useful for testing responsive layouts.                                                                    |
 | **`viewport_height`** | `int` (default: `600`)                 | Initial page height (in px).                                                                                                          |
 | **`viewport`**        | `dict` (default: `None`)               | Viewport dimensions dict. If set, overrides `viewport_width` and `viewport_height`.                                                   |
+| **`device_scale_factor`** | `float` (default: `1.0`)           | Device pixel ratio for rendering. Use `2.0` for Retina-quality screenshots. Higher values produce larger images and use more memory.  |
 | **`proxy`**           | `str` (deprecated)                      | Deprecated. Use `proxy_config` instead. If set, it will be auto-converted internally. |
 | **`proxy_config`**    | `ProxyConfig or dict` (default: `None`)| For advanced or multi-proxy needs, specify `ProxyConfig` object or dict like `{"server": "...", "username": "...", "password": "..."}`.  |
 | **`use_persistent_context`** | `bool` (default: `False`)       | If `True`, uses a **persistent** browser context (keep cookies, sessions across runs). Also sets `use_managed_browser=True`.          |

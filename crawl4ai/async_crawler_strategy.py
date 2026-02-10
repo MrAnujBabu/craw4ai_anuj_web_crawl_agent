@@ -572,6 +572,7 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
         execution_result = None
         status_code = None
         redirected_url = url
+        redirected_status_code = None
 
         # Reset downloaded files list for new crawl
         self._downloaded_files = []
@@ -821,6 +822,7 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
                             url, wait_until=config.wait_until, timeout=config.page_timeout
                         )
                         redirected_url = page.url
+                        redirected_status_code = response.status if response else None
                     except Error as e:
                         # Allow navigation to be aborted when downloading files
                         # This is expected behavior for downloads in some browser engines
@@ -1026,6 +1028,7 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
                             "scale": scale,
                         },
                     )
+                    await cdp.detach()
                 except Exception as e:
                     self.logger.warning(
                         message="Failed to adjust viewport to content: {error}",
@@ -1243,6 +1246,7 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
                     self._downloaded_files if self._downloaded_files else None
                 ),
                 redirected_url=redirected_url,
+                redirected_status_code=redirected_status_code,
                 # Include captured data if enabled
                 network_requests=captured_requests
                 if config.capture_network_requests
@@ -1264,7 +1268,7 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
                 pass
             elif total_pages <= 1 and (self.browser_config.use_managed_browser or self.browser_config.headless):
                 # Keep the page open but release it for reuse by next crawl
-                self.browser_manager.release_page(page)
+                await self.browser_manager.release_page_with_context(page)
             else:
                 # Detach listeners before closing to prevent potential errors during close
                 if config.capture_network_requests:
@@ -1282,8 +1286,8 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
                     # Clean up console capture
                     await self.adapter.cleanup_console_capture(page, handle_console, handle_error)
 
-                # Release page from tracking before closing
-                self.browser_manager.release_page(page)
+                # Release page and decrement context refcount before closing
+                await self.browser_manager.release_page_with_context(page)
                 # Close the page
                 await page.close()
 
@@ -1817,7 +1821,7 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
             # Clean up the page
             if page:
                 try:
-                    self.browser_manager.release_page(page)
+                    await self.browser_manager.release_page_with_context(page)
                     await page.close()
                 except Exception:
                     pass

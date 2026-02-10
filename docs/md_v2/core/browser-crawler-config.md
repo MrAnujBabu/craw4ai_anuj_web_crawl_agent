@@ -84,11 +84,16 @@ class BrowserConfig:
 ```
    - Leave as `None` if a proxy is not required.
 
-7.⠀**`viewport_width` & `viewport_height`**  
-   - The initial window size.  
+7.⠀**`viewport_width` & `viewport_height`**
+   - The initial window size.
    - Some sites behave differently with smaller or bigger viewports.
 
-8.⠀**`verbose`**  
+8.⠀**`device_scale_factor`**
+   - Controls the device pixel ratio (DPR) for rendering. Default is `1.0`.
+   - Set to `2.0` for Retina-quality screenshots (e.g., a 1920×1080 viewport produces 3840×2160 images).
+   - Higher values increase screenshot size and rendering time proportionally.
+
+9.⠀**`verbose`**  
    - If `True`, prints extra logs.  
    - Handy for debugging.
 
