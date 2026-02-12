@@ -109,14 +109,13 @@ class ManagedBrowser:
                 "--disable-software-rasterizer",
                 "--disable-dev-shm-usage",
             ])
-        # proxy support
+        # proxy support — only pass server URL, never credentials.
+        # Chromium's --proxy-server flag silently ignores inline user:pass@.
+        # Auth credentials are handled at the Playwright context level instead.
         if config.proxy:
             flags.append(f"--proxy-server={config.proxy}")
         elif config.proxy_config:
-            creds = ""
-            if config.proxy_config.username and config.proxy_config.password:
-                creds = f"{config.proxy_config.username}:{config.proxy_config.password}@"
-            flags.append(f"--proxy-server={creds}{config.proxy_config.server}")
+            flags.append(f"--proxy-server={config.proxy_config.server}")
         # dedupe
         return list(dict.fromkeys(flags))
 
@@ -711,6 +710,7 @@ class BrowserManager:
         self.managed_browser = None
         self.playwright = None
         self._using_cached_cdp = False
+        self._launched_persistent = False  # True when using launch_persistent_context
 
         # Session management
         self.sessions = {}
@@ -792,6 +792,76 @@ class BrowserManager:
 
             # Initialize playwright
             self.playwright = await async_playwright().start()
+
+        # ── Persistent context via Playwright's native API ──────────────
+        # When use_persistent_context is set and we're not connecting to an
+        # external CDP endpoint, use launch_persistent_context() instead of
+        # subprocess + CDP.  This properly supports proxy authentication
+        # (server + username + password) which the --proxy-server CLI flag
+        # cannot handle.
+        if (
+            self.config.use_persistent_context
+            and not self.config.cdp_url
+            and not self._using_cached_cdp
+        ):
+            # Collect stealth / optimization CLI flags, excluding ones that
+            # launch_persistent_context handles via keyword arguments.
+            _skip_prefixes = (
+                "--proxy-server",
+                "--remote-debugging-port",
+                "--user-data-dir",
+                "--headless",
+                "--window-size",
+            )
+            cli_args = [
+                flag
+                for flag in ManagedBrowser.build_browser_flags(self.config)
+                if not flag.startswith(_skip_prefixes)
+            ]
+            if self.config.extra_args:
+                cli_args.extend(self.config.extra_args)
+
+            launch_kwargs = {
+                "headless": self.config.headless,
+                "args": list(dict.fromkeys(cli_args)),  # dedupe
+                "viewport": {
+                    "width": self.config.viewport_width,
+                    "height": self.config.viewport_height,
+                },
+                "user_agent": self.config.user_agent or None,
+                "ignore_https_errors": self.config.ignore_https_errors,
+                "accept_downloads": self.config.accept_downloads,
+            }
+
+            if self.config.proxy_config:
+                launch_kwargs["proxy"] = {
+                    "server": self.config.proxy_config.server,
+                    "username": self.config.proxy_config.username,
+                    "password": self.config.proxy_config.password,
+                }
+
+            if self.config.storage_state:
+                launch_kwargs["storage_state"] = self.config.storage_state
+
+            user_data_dir = self.config.user_data_dir or tempfile.mkdtemp(
+                prefix="crawl4ai-persistent-"
+            )
+
+            self.default_context = (
+                await self.playwright.chromium.launch_persistent_context(
+                    user_data_dir, **launch_kwargs
+                )
+            )
+            self.browser = None  # persistent context has no separate Browser
+            self._launched_persistent = True
+
+            await self.setup_context(self.default_context)
+
+            # Set the browser endpoint key for global page tracking
+            self._browser_endpoint_key = self._compute_browser_endpoint_key()
+            if self._browser_endpoint_key not in BrowserManager._global_pages_in_use:
+                BrowserManager._global_pages_in_use[self._browser_endpoint_key] = set()
+            return
 
         if self.config.cdp_url or self.config.use_managed_browser:
             self.config.use_managed_browser = True
@@ -1158,6 +1228,12 @@ class BrowserManager:
         Returns:
             Context: Browser context object with the specified configurations
         """
+        if self.browser is None:
+            raise RuntimeError(
+                "Cannot create new browser contexts when using "
+                "use_persistent_context=True. Persistent context uses a "
+                "single shared context."
+            )
         # Base settings
         user_agent = self.config.headers.get("User-Agent", self.config.user_agent) 
         viewport_settings = {
@@ -1856,6 +1932,35 @@ class BrowserManager:
                 if self.playwright:
                     await self.playwright.stop()
                     self.playwright = None
+            return
+
+        # ── Persistent context launched via launch_persistent_context ──
+        if self._launched_persistent:
+            session_ids = list(self.sessions.keys())
+            for session_id in session_ids:
+                await self.kill_session(session_id)
+            for ctx in self.contexts_by_config.values():
+                try:
+                    await ctx.close()
+                except Exception:
+                    pass
+            self.contexts_by_config.clear()
+            self._context_refcounts.clear()
+            self._context_last_used.clear()
+            self._page_to_sig.clear()
+
+            # Closing the persistent context also terminates the browser
+            if self.default_context:
+                try:
+                    await self.default_context.close()
+                except Exception:
+                    pass
+                self.default_context = None
+
+            if self.playwright:
+                await self.playwright.stop()
+                self.playwright = None
+            self._launched_persistent = False
             return
 
         if self.config.sleep_on_close:
