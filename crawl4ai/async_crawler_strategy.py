@@ -19,7 +19,7 @@ from .config import SCREENSHOT_HEIGHT_TRESHOLD
 from .async_configs import BrowserConfig, CrawlerRunConfig, HTTPCrawlerConfig
 from .async_logger import AsyncLogger
 from .ssl_certificate import SSLCertificate
-from .user_agent_generator import ValidUAGenerator
+from .user_agent_generator import ValidUAGenerator, UAGen
 from .browser_manager import BrowserManager
 from .browser_adapter import BrowserAdapter, PlaywrightAdapter, UndetectedAdapter
 
@@ -534,17 +534,41 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
         captured_requests = []
         captured_console = []
 
-        # Handle user agent with magic mode
-        user_agent_to_override = config.user_agent
-        if user_agent_to_override:
-            self.browser_config.user_agent = user_agent_to_override
-        elif config.magic or config.user_agent_mode == "random":
-            self.browser_config.user_agent = ValidUAGenerator().generate(
-                **(config.user_agent_generator_config or {})
+        # Handle user agent with magic mode.
+        # For persistent contexts the UA is locked at browser launch time
+        # (launch_persistent_context bakes it into the protocol layer), so
+        # changing it here would only desync browser_config from reality.
+        # Users should set user_agent or user_agent_mode on BrowserConfig.
+        ua_changed = False
+        if not self.browser_config.use_persistent_context:
+            user_agent_to_override = config.user_agent
+            if user_agent_to_override:
+                self.browser_config.user_agent = user_agent_to_override
+                ua_changed = True
+            elif config.magic or config.user_agent_mode == "random":
+                self.browser_config.user_agent = ValidUAGenerator().generate(
+                    **(config.user_agent_generator_config or {})
+                )
+                ua_changed = True
+
+        # Keep sec-ch-ua in sync whenever the UA changed
+        if ua_changed:
+            self.browser_config.browser_hint = UAGen.generate_client_hints(
+                self.browser_config.user_agent
             )
+            self.browser_config.headers["sec-ch-ua"] = self.browser_config.browser_hint
 
         # Get page for session
         page, context = await self.browser_manager.get_page(crawlerRunConfig=config)
+
+        # Push updated UA + sec-ch-ua to the page so the server sees them
+        if ua_changed:
+            combined_headers = {
+                "User-Agent": self.browser_config.user_agent,
+                "sec-ch-ua": self.browser_config.browser_hint,
+            }
+            combined_headers.update(self.browser_config.headers)
+            await page.set_extra_http_headers(combined_headers)
 
         # await page.goto(URL)
 
