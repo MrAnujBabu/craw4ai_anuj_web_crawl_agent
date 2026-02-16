@@ -2448,7 +2448,8 @@ class AsyncHTTPCrawlerStrategy(AsyncCrawlerStrategy):
                     
                     encoding = response.charset
                     if not encoding:
-                        encoding = chardet.detect(content.tobytes())['encoding'] or 'utf-8'                    
+                        detection_result = await asyncio.to_thread(chardet.detect, content.tobytes())
+                        encoding = detection_result['encoding'] or 'utf-8'                    
                     
                     result = AsyncCrawlResponse(
                         html=content.tobytes().decode(encoding, errors='replace'),
