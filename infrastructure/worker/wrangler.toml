@@ -32,7 +32,7 @@ new_sqlite_classes = ["SEOAuditMcpAgent"]
 [[d1_databases]]
 binding = "DB"
 database_name = "seo-audit-db"
-database_id = ""  # Fill after: wrangler d1 create seo-audit-db
+database_id = "4b98d8a3-fb04-45db-985d-58e041aceb5b"
 
 # ─── R2 Bucket (raw HTML snapshots) ──────────────────────────────────
 [[r2_buckets]]
