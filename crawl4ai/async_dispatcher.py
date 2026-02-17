@@ -465,7 +465,7 @@ class MemoryAdaptiveDispatcher(BaseDispatcher):
             memory_monitor.cancel()
             if self.monitor:
                 self.monitor.stop()
-            return results
+        return results
                 
     async def _update_queue_priorities(self):
         """Periodically update priorities of items in the queue to prevent starvation"""
