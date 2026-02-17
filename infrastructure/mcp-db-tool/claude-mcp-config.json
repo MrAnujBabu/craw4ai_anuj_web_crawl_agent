@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "seo-audit": {
+      "command": "node",
+      "args": ["/path/to/infrastructure/mcp-db-tool/index.js"],
+      "env": {
+        "GATEWAY_URL": "https://seo-audit-gateway.YOUR-SUBDOMAIN.workers.dev",
+        "API_KEY": "your-api-key-here"
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+name = "seo-audit-gateway"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# ─── D1 Database ──────────────────────────────────────────────────────
+[[d1_databases]]
+binding = "DB"
+database_name = "seo-audit-db"
+database_id = ""  # Fill after: wrangler d1 create seo-audit-db
+
+# ─── R2 Bucket (raw HTML snapshots) ──────────────────────────────────
+[[r2_buckets]]
+binding = "SNAPSHOTS"
+bucket_name = "seo-audit-snapshots"
+
+# ─── Secrets (set via: wrangler secret put <name>) ────────────────────
+# API_KEY          - Bearer token for authenticating requests
+# DOCKER_API_URL   - URL of the Docker orchestrator (e.g. container runtime API)
+
+[vars]
+ENVIRONMENT = "production"
+MAX_PAGES_DEFAULT = 50
+MAX_DEPTH_DEFAULT = 3
