@@ -232,6 +232,7 @@ if __name__ == "__main__":
 - Great for repetitive page structures (e.g., item listings, articles).
 - No AI usage or costs.
 - The crawler returns a JSON string you can parse or store.
+- For sites where data is split across sibling elements (e.g. Hacker News), use the `"source"` field key to navigate to a sibling before extracting: `{"name": "score", "selector": "span.score", "type": "text", "source": "+ tr"}`.
 > Tips: You can pass raw HTML to the crawler instead of a URL. To do so, prefix the HTML with `raw://`.
 ## 6. Simple Data Extraction (LLM-based)
 - **Open-Source Models** (e.g., `ollama/llama3.3`, `no_token`)  

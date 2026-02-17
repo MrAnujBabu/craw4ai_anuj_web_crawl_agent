@@ -120,7 +120,8 @@ schema = {
             "attribute": str, # For type="attribute"
             "pattern": str,  # For type="regex"
             "transform": str, # Optional: "lowercase", "uppercase", "strip"
-            "default": Any    # Default value if extraction fails
+            "default": Any,   # Default value if extraction fails
+            "source": str,   # Optional: navigate to sibling first, e.g. "+ tr"
         }
     ]
 }

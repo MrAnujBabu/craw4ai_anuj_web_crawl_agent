@@ -56,6 +56,34 @@ def _strip_markdown_fences(text: str) -> str:
     ).strip()
 
 
+def _get_top_level_structure(html_content: str, max_depth: int = 3) -> str:
+    """Return a compact tag outline of the HTML body up to a given depth.
+
+    Used in schema validation feedback when baseSelector matches 0 elements,
+    so the LLM can see what top-level tags actually exist.
+    """
+    try:
+        tree = html.fromstring(html_content)
+    except Exception:
+        return ""
+    body = tree.xpath("//body")
+    root = body[0] if body else tree
+    lines = []
+
+    def _walk(el, depth):
+        if depth > max_depth or not isinstance(el.tag, str):
+            return
+        classes = el.get("class", "").split()
+        cls_str = "." + ".".join(classes) if classes else ""
+        id_str = f"#{el.get('id')}" if el.get("id") else ""
+        lines.append("  " * depth + f"<{el.tag}{id_str}{cls_str}>")
+        for child in el:
+            _walk(child, depth + 1)
+
+    _walk(root, 0)
+    return "\n".join(lines[:60])
+
+
 class ExtractionStrategy(ABC):
     """
     Abstract base class for all extraction strategies.
@@ -1172,6 +1200,11 @@ class JsonElementExtractionStrategy(ExtractionStrategy):
 
     def _extract_field(self, element, field):
         try:
+            if "source" in field:
+                element = self._resolve_source(element, field["source"])
+                if element is None:
+                    return field.get("default")
+
             if field["type"] == "nested":
                 nested_elements = self._get_elements(element, field["selector"])
                 nested_element = nested_elements[0] if nested_elements else None
@@ -1344,6 +1377,274 @@ class JsonElementExtractionStrategy(ExtractionStrategy):
         """Get attribute value from element"""
         pass
 
+    @abstractmethod
+    def _resolve_source(self, element, source: str):
+        """Navigate to a sibling element relative to the base element.
+
+        Used when a field's data lives in a sibling of the base element
+        rather than a descendant. For example, Hacker News splits each
+        submission across two sibling <tr> rows.
+
+        Args:
+            element: The current base element.
+            source: A sibling selector string. Currently supports the
+                ``"+ <selector>"`` syntax which navigates to the next
+                sibling matching ``<selector>``.
+
+        Returns:
+            The resolved sibling element, or ``None`` if not found.
+        """
+        pass
+
+    @staticmethod
+    def _validate_schema(
+        schema: dict,
+        html_content: str,
+        schema_type: str = "CSS",
+        expected_fields: Optional[List[str]] = None,
+    ) -> dict:
+        """Run the generated schema against HTML and return a diagnostic result.
+
+        Args:
+            schema: The extraction schema to validate.
+            html_content: The HTML to validate against.
+            schema_type: "CSS" or "XPATH".
+            expected_fields: When provided, enables strict mode — success
+                requires ALL expected fields to be present and populated.
+                When None, uses fuzzy mode (populated_fields > 0).
+
+        Returns a dict with keys: success, base_elements_found, total_fields,
+        populated_fields, field_coverage, field_details, issues,
+        sample_base_html, top_level_structure.
+        """
+        result = {
+            "success": False,
+            "base_elements_found": 0,
+            "total_fields": 0,
+            "populated_fields": 0,
+            "field_coverage": 0.0,
+            "field_details": [],
+            "issues": [],
+            "sample_base_html": "",
+            "top_level_structure": "",
+        }
+
+        try:
+            StrategyClass = (
+                JsonCssExtractionStrategy
+                if schema_type.upper() == "CSS"
+                else JsonXPathExtractionStrategy
+            )
+            strategy = StrategyClass(schema=schema)
+            items = strategy.extract(url="", html_content=html_content)
+        except Exception as e:
+            result["issues"].append(f"Extraction crashed: {e}")
+            return result
+
+        # Count base elements directly
+        try:
+            parsed = strategy._parse_html(html_content)
+            base_elements = strategy._get_base_elements(parsed, schema["baseSelector"])
+            result["base_elements_found"] = len(base_elements)
+
+            # Grab sample innerHTML of first base element (truncated)
+            if base_elements:
+                sample = strategy._get_element_html(base_elements[0])
+                result["sample_base_html"] = sample[:2000]
+        except Exception:
+            pass
+
+        if result["base_elements_found"] == 0:
+            result["issues"].append(
+                f"baseSelector '{schema.get('baseSelector', '')}' matched 0 elements"
+            )
+            result["top_level_structure"] = _get_top_level_structure(html_content)
+            return result
+
+        # Analyze field coverage
+        all_fields = schema.get("fields", [])
+        field_names = [f["name"] for f in all_fields]
+        result["total_fields"] = len(field_names)
+
+        for fname in field_names:
+            values = [item.get(fname) for item in items]
+            populated_count = sum(1 for v in values if v is not None and v != "")
+            sample_val = next((v for v in values if v is not None and v != ""), None)
+            if sample_val is not None:
+                sample_val = str(sample_val)[:120]
+            result["field_details"].append({
+                "name": fname,
+                "populated_count": populated_count,
+                "total_count": len(items),
+                "sample_value": sample_val,
+            })
+
+        result["populated_fields"] = sum(
+            1 for fd in result["field_details"] if fd["populated_count"] > 0
+        )
+        if result["total_fields"] > 0:
+            result["field_coverage"] = result["populated_fields"] / result["total_fields"]
+
+        # Build issues
+        if result["populated_fields"] == 0:
+            result["issues"].append(
+                "All fields returned None/empty — selectors likely wrong"
+            )
+        else:
+            empty_fields = [
+                fd["name"]
+                for fd in result["field_details"]
+                if fd["populated_count"] == 0
+            ]
+            if empty_fields:
+                result["issues"].append(
+                    f"Fields always empty: {', '.join(empty_fields)}"
+                )
+
+        # Check for missing expected fields (strict mode)
+        if expected_fields:
+            schema_field_names = {f["name"] for f in schema.get("fields", [])}
+            missing = [f for f in expected_fields if f not in schema_field_names]
+            if missing:
+                result["issues"].append(
+                    f"Expected fields missing from schema: {', '.join(missing)}"
+                )
+
+        # Success criteria
+        if expected_fields:
+            # Strict: all expected fields must exist in schema AND be populated
+            schema_field_names = {f["name"] for f in schema.get("fields", [])}
+            populated_names = {
+                fd["name"] for fd in result["field_details"] if fd["populated_count"] > 0
+            }
+            result["success"] = (
+                result["base_elements_found"] > 0
+                and all(f in populated_names for f in expected_fields)
+            )
+        else:
+            # Fuzzy: at least something extracted
+            result["success"] = (
+                result["base_elements_found"] > 0 and result["populated_fields"] > 0
+            )
+        return result
+
+    @staticmethod
+    def _build_feedback_message(
+        validation_result: dict,
+        schema: dict,
+        attempt: int,
+        is_repeated: bool,
+    ) -> str:
+        """Build a structured feedback message from a validation result."""
+        vr = validation_result
+        parts = []
+
+        parts.append(f"## Schema Validation — Attempt {attempt}")
+
+        # Base selector
+        if vr["base_elements_found"] == 0:
+            parts.append(
+                f"**CRITICAL:** baseSelector `{schema.get('baseSelector', '')}` "
+                f"matched **0 elements**. The schema cannot extract anything."
+            )
+            if vr["top_level_structure"]:
+                parts.append(
+                    "Here is the top-level HTML structure so you can pick a valid selector:\n```\n"
+                    + vr["top_level_structure"]
+                    + "\n```"
+                )
+        else:
+            parts.append(
+                f"baseSelector matched **{vr['base_elements_found']}** element(s)."
+            )
+
+        # Field coverage table
+        if vr["field_details"]:
+            parts.append(
+                f"\n**Field coverage:** {vr['populated_fields']}/{vr['total_fields']} fields have data\n"
+            )
+            parts.append("| Field | Populated | Sample |")
+            parts.append("|-------|-----------|--------|")
+            for fd in vr["field_details"]:
+                sample = fd["sample_value"] or "*(empty)*"
+                parts.append(
+                    f"| {fd['name']} | {fd['populated_count']}/{fd['total_count']} | {sample} |"
+                )
+
+        # Issues
+        if vr["issues"]:
+            parts.append("\n**Issues:**")
+            for issue in vr["issues"]:
+                parts.append(f"- {issue}")
+
+        # Sample base HTML when all fields empty
+        if vr["populated_fields"] == 0 and vr["sample_base_html"]:
+            parts.append(
+                "\nHere is the innerHTML of the first base element — "
+                "use it to find correct child selectors:\n```html\n"
+                + vr["sample_base_html"]
+                + "\n```"
+            )
+
+        # Repeated schema warning
+        if is_repeated:
+            parts.append(
+                "\n**WARNING:** You returned the exact same schema as before. "
+                "You MUST change the selectors to fix the issues above."
+            )
+
+        parts.append(
+            "\nPlease fix the schema and return ONLY valid JSON, nothing else."
+        )
+        return "\n".join(parts)
+
+    @staticmethod
+    async def _infer_target_json(query: str, html_snippet: str, llm_config, url: str = None) -> Optional[dict]:
+        """Infer a target JSON example from a query and HTML snippet via a quick LLM call.
+
+        Returns the parsed dict, or None if inference fails.
+        """
+        from .utils import aperform_completion_with_backoff
+
+        url_line = f"URL: {url}\n" if url else ""
+        prompt = (
+            "You are given a data extraction request and a snippet of HTML from a webpage.\n"
+            "Your job is to produce a single example JSON object representing ONE item "
+            "that the user wants to extract.\n\n"
+            "Rules:\n"
+            "- Return ONLY a valid JSON object — one flat object, NOT wrapped in an array or outer key.\n"
+            "- The object represents a single repeated item (e.g., one product, one article, one row).\n"
+            "- Use clean snake_case field names matching the user's description.\n"
+            "- If the item has nested repeated sub-items, represent those as an array with one example inside.\n"
+            "- Fill values with realistic examples from the HTML so the meaning is clear.\n\n"
+            'Example — if the request is "extract product name, price, and reviews":\n'
+            '{"name": "Widget Pro", "price": "$29.99", "reviews": [{"author": "Jane", "text": "Great product"}]}\n\n'
+            f"{url_line}"
+            f"Extraction request: {query}\n\n"
+            f"HTML snippet:\n```html\n{html_snippet[:2000]}\n```\n\n"
+            "Return ONLY the JSON object for ONE item:"
+        )
+
+        try:
+            response = await aperform_completion_with_backoff(
+                provider=llm_config.provider,
+                prompt_with_variables=prompt,
+                json_response=True,
+                api_token=llm_config.api_token,
+                base_url=llm_config.base_url,
+            )
+            raw = response.choices[0].message.content
+            if not raw or not raw.strip():
+                return None
+            return json.loads(_strip_markdown_fences(raw))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _extract_expected_fields(target_json: dict) -> List[str]:
+        """Extract top-level field names from a target JSON example."""
+        return list(target_json.keys())
+
     _GENERATE_SCHEMA_UNWANTED_PROPS = {
         'provider': 'Instead, use llm_config=LLMConfig(provider="...")',
         'api_token': 'Instead, use llm_config=LlMConfig(api_token="...")',
@@ -1423,6 +1724,8 @@ In this scenario, use your best judgment to generate the schema. You need to exa
         provider: str = None,
         api_token: str = None,
         url: Union[str, List[str]] = None,
+        validate: bool = True,
+        max_refinements: int = 3,
         **kwargs
     ) -> dict:
         """
@@ -1438,6 +1741,9 @@ In this scenario, use your best judgment to generate the schema. You need to exa
             api_token (str): Legacy Parameter. API token for LLM provider.
             url (str or List[str], optional): URL(s) to fetch HTML from. If provided, html parameter is ignored.
                 When multiple URLs are provided, HTMLs are fetched in parallel and concatenated.
+            validate (bool): If True, validate the schema against the HTML and
+                refine via LLM feedback loop. Defaults to False (zero overhead).
+            max_refinements (int): Max refinement rounds when validate=True. Defaults to 3.
             **kwargs: Additional args passed to LLM processor.
 
         Returns:
@@ -1462,6 +1768,8 @@ In this scenario, use your best judgment to generate the schema. You need to exa
             provider=provider,
             api_token=api_token,
             url=url,
+            validate=validate,
+            max_refinements=max_refinements,
             **kwargs
         )
 
@@ -1483,6 +1791,8 @@ In this scenario, use your best judgment to generate the schema. You need to exa
         provider: str = None,
         api_token: str = None,
         url: Union[str, List[str]] = None,
+        validate: bool = True,
+        max_refinements: int = 3,
         **kwargs
     ) -> dict:
         """
@@ -1502,6 +1812,9 @@ In this scenario, use your best judgment to generate the schema. You need to exa
             api_token (str): Legacy Parameter. API token for LLM provider.
             url (str or List[str], optional): URL(s) to fetch HTML from. If provided, html parameter is ignored.
                 When multiple URLs are provided, HTMLs are fetched in parallel and concatenated.
+            validate (bool): If True, validate the schema against the HTML and
+                refine via LLM feedback loop. Defaults to False (zero overhead).
+            max_refinements (int): Max refinement rounds when validate=True. Defaults to 3.
             **kwargs: Additional args passed to LLM processor.
 
         Returns:
@@ -1523,6 +1836,9 @@ In this scenario, use your best judgment to generate the schema. You need to exa
 
         if llm_config is None:
             llm_config = create_llm_config()
+
+        # Save original HTML(s) before preprocessing (for validation against real HTML)
+        original_htmls = []
 
         # Fetch HTML from URL(s) if provided
         if url is not None:
@@ -1547,6 +1863,7 @@ In this scenario, use your best judgment to generate the schema. You need to exa
                     if result.status_code >= 400:
                         raise Exception(f"HTTP {result.status_code} error for URL '{urls[0]}'")
                     html = result.html
+                    original_htmls = [result.html]
                 else:
                     results = await crawler.arun_many(urls=urls, config=crawler_config)
                     html_parts = []
@@ -1555,6 +1872,7 @@ In this scenario, use your best judgment to generate the schema. You need to exa
                             raise Exception(f"Failed to fetch URL '{result.url}': {result.error_message}")
                         if result.status_code >= 400:
                             raise Exception(f"HTTP {result.status_code} error for URL '{result.url}'")
+                        original_htmls.append(result.html)
                         cleaned = preprocess_html_for_schema(
                             html_content=result.html,
                             text_threshold=2000,
@@ -1564,6 +1882,8 @@ In this scenario, use your best judgment to generate the schema. You need to exa
                         header = HTML_EXAMPLE_DELIMITER.format(index=i)
                         html_parts.append(f"{header}\n{cleaned}")
                     html = "\n\n".join(html_parts)
+        else:
+            original_htmls = [html]
 
         # Preprocess HTML for schema generation (skip if already preprocessed from multiple URLs)
         if url is None or isinstance(url, str):
@@ -1574,25 +1894,110 @@ In this scenario, use your best judgment to generate the schema. You need to exa
                 max_size=500_000
             )
 
-        prompt = JsonElementExtractionStrategy._build_schema_prompt(html, schema_type, query, target_json_example)
+        # --- Resolve expected fields for strict validation ---
+        expected_fields = None
+        if validate:
+            if target_json_example:
+                # User provided target JSON — extract field names from it
+                try:
+                    if isinstance(target_json_example, str):
+                        target_obj = json.loads(target_json_example)
+                    else:
+                        target_obj = target_json_example
+                    expected_fields = JsonElementExtractionStrategy._extract_expected_fields(target_obj)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            elif query:
+                # No target JSON but query describes fields — infer via quick LLM call
+                first_url = None
+                if url is not None:
+                    first_url = url if isinstance(url, str) else url[0]
+                inferred = await JsonElementExtractionStrategy._infer_target_json(
+                    query=query, html_snippet=html, llm_config=llm_config, url=first_url
+                )
+                if inferred:
+                    expected_fields = JsonElementExtractionStrategy._extract_expected_fields(inferred)
+                    # Also inject as target_json_example for the schema prompt
+                    if not target_json_example:
+                        target_json_example = json.dumps(inferred, indent=2)
 
-        try:
-            response = await aperform_completion_with_backoff(
-                provider=llm_config.provider,
-                prompt_with_variables=prompt,
-                json_response=True,
-                api_token=llm_config.api_token,
-                base_url=llm_config.base_url,
-                extra_args=kwargs
+        prompt = JsonElementExtractionStrategy._build_schema_prompt(html, schema_type, query, target_json_example)
+        messages = [{"role": "user", "content": prompt}]
+
+        prev_schema_json = None
+        last_schema = None
+        max_attempts = 1 + (max_refinements if validate else 0)
+
+        for attempt in range(max_attempts):
+            try:
+                response = await aperform_completion_with_backoff(
+                    provider=llm_config.provider,
+                    prompt_with_variables=prompt,
+                    json_response=True,
+                    api_token=llm_config.api_token,
+                    base_url=llm_config.base_url,
+                    messages=messages,
+                    extra_args=kwargs,
+                )
+                raw = response.choices[0].message.content
+                if not raw or not raw.strip():
+                    raise ValueError("LLM returned an empty response")
+
+                schema = json.loads(_strip_markdown_fences(raw))
+                last_schema = schema
+            except json.JSONDecodeError as e:
+                # JSON parse failure — ask LLM to fix it
+                if not validate or attempt >= max_attempts - 1:
+                    raise Exception(f"Failed to parse schema JSON: {str(e)}")
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({"role": "user", "content": (
+                    f"Your response was not valid JSON. Parse error: {e}\n"
+                    "Please return ONLY valid JSON, nothing else."
+                )})
+                continue
+            except Exception as e:
+                raise Exception(f"Failed to generate schema: {str(e)}")
+
+            # If validation is off, return immediately (zero overhead path)
+            if not validate:
+                return schema
+
+            # --- Validation feedback loop ---
+            # Validate against original HTML(s); success if works on at least one
+            best_result = None
+            for orig_html in original_htmls:
+                vr = JsonElementExtractionStrategy._validate_schema(
+                    schema, orig_html, schema_type,
+                    expected_fields=expected_fields,
+                )
+                if best_result is None or vr["populated_fields"] > best_result["populated_fields"]:
+                    best_result = vr
+                if vr["success"]:
+                    break
+
+            if best_result["success"]:
+                return schema
+
+            # Last attempt — return best-effort
+            if attempt >= max_attempts - 1:
+                return schema
+
+            # Detect repeated schema
+            current_json = json.dumps(schema, sort_keys=True)
+            is_repeated = current_json == prev_schema_json
+            prev_schema_json = current_json
+
+            # Build feedback and extend conversation
+            feedback = JsonElementExtractionStrategy._build_feedback_message(
+                best_result, schema, attempt + 1, is_repeated
             )
-            raw = response.choices[0].message.content
-            if not raw or not raw.strip():
-                raise ValueError("LLM returned an empty response")
-            return json.loads(_strip_markdown_fences(raw))
-        except json.JSONDecodeError as e:
-            raise Exception(f"Failed to parse schema JSON: {str(e)}")
-        except Exception as e:
-            raise Exception(f"Failed to generate schema: {str(e)}")
+            messages.append({"role": "assistant", "content": raw})
+            messages.append({"role": "user", "content": feedback})
+
+        # Should not reach here, but return last schema as safety net
+        if last_schema is not None:
+            return last_schema
+        raise Exception("Failed to generate schema: no attempts succeeded")
 
 class JsonCssExtractionStrategy(JsonElementExtractionStrategy):
     """
@@ -1640,6 +2045,21 @@ class JsonCssExtractionStrategy(JsonElementExtractionStrategy):
 
     def _get_element_attribute(self, element, attribute: str):
         return element.get(attribute)
+
+    def _resolve_source(self, element, source: str):
+        source = source.strip()
+        if not source.startswith("+"):
+            return None
+        sel = source[1:].strip()  # e.g. "tr", "tr.subtext", ".classname"
+        parts = sel.split(".")
+        tag = parts[0].strip() or None
+        classes = [p.strip() for p in parts[1:] if p.strip()]
+        kwargs = {}
+        if classes:
+            kwargs["class_"] = lambda c, _cls=classes: c and all(
+                cl in c for cl in _cls
+            )
+        return element.find_next_sibling(tag, **kwargs)
 
 class JsonLxmlExtractionStrategy(JsonElementExtractionStrategy):
     def __init__(self, schema: Dict[str, Any], **kwargs):
@@ -1906,7 +2326,22 @@ class JsonLxmlExtractionStrategy(JsonElementExtractionStrategy):
             if self.verbose:
                 print(f"Error getting attribute '{attribute}': {e}")
             return None
-            
+
+    def _resolve_source(self, element, source: str):
+        source = source.strip()
+        if not source.startswith("+"):
+            return None
+        sel = source[1:].strip()
+        parts = sel.split(".")
+        tag = parts[0].strip() or "*"
+        classes = [p.strip() for p in parts[1:] if p.strip()]
+        xpath = f"./following-sibling::{tag}"
+        for cls in classes:
+            xpath += f"[contains(concat(' ',normalize-space(@class),' '),' {cls} ')]"
+        xpath += "[1]"
+        results = element.xpath(xpath)
+        return results[0] if results else None
+
     def _clear_caches(self):
         """Clear caches to free memory"""
         if self.use_caching:
@@ -2007,7 +2442,22 @@ class JsonLxmlExtractionStrategy_naive(JsonElementExtractionStrategy):
         return etree.tostring(element, encoding='unicode')
     
     def _get_element_attribute(self, element, attribute: str):
-        return element.get(attribute)    
+        return element.get(attribute)
+
+    def _resolve_source(self, element, source: str):
+        source = source.strip()
+        if not source.startswith("+"):
+            return None
+        sel = source[1:].strip()
+        parts = sel.split(".")
+        tag = parts[0].strip() or "*"
+        classes = [p.strip() for p in parts[1:] if p.strip()]
+        xpath = f"./following-sibling::{tag}"
+        for cls in classes:
+            xpath += f"[contains(concat(' ',normalize-space(@class),' '),' {cls} ')]"
+        xpath += "[1]"
+        results = element.xpath(xpath)
+        return results[0] if results else None
 
 class JsonXPathExtractionStrategy(JsonElementExtractionStrategy):
     """
@@ -2072,6 +2522,21 @@ class JsonXPathExtractionStrategy(JsonElementExtractionStrategy):
 
     def _get_element_attribute(self, element, attribute: str):
         return element.get(attribute)
+
+    def _resolve_source(self, element, source: str):
+        source = source.strip()
+        if not source.startswith("+"):
+            return None
+        sel = source[1:].strip()
+        parts = sel.split(".")
+        tag = parts[0].strip() or "*"
+        classes = [p.strip() for p in parts[1:] if p.strip()]
+        xpath = f"./following-sibling::{tag}"
+        for cls in classes:
+            xpath += f"[contains(concat(' ',normalize-space(@class),' '),' {cls} ')]"
+        xpath += "[1]"
+        results = element.xpath(xpath)
+        return results[0] if results else None
 
 """
 RegexExtractionStrategy

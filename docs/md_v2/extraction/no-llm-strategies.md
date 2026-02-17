@@ -92,9 +92,10 @@ asyncio.run(extract_crypto_prices())
 
 **Highlights**:
 
-- **`baseSelector`**: Tells us where each "item" (crypto row) is.  
-- **`fields`**: Two fields (`coin_name`, `price`) using simple CSS selectors.  
+- **`baseSelector`**: Tells us where each "item" (crypto row) is.
+- **`fields`**: Two fields (`coin_name`, `price`) using simple CSS selectors.
 - Each field defines a **`type`** (e.g., `text`, `attribute`, `html`, `regex`, etc.).
+- Optional keys: **`transform`**, **`default`**, **`attribute`**, **`pattern`**, and **`source`** (for sibling data — see [Extracting Sibling Data](#sibling-data)).
 
 No LLM is needed, and the performance is **near-instant** for hundreds or thousands of items.
 
@@ -623,7 +624,60 @@ Then run with `JsonCssExtractionStrategy(schema)` to get an array of blog post o
 
 ---
 
-## 8. Tips & Best Practices
+## 8. Extracting Sibling Data with `source` {#sibling-data}
+
+Some websites split a single logical item across **sibling elements** rather than nesting everything inside one container. A classic example is Hacker News, where each submission spans two adjacent `<tr>` rows:
+
+```html
+<tr class="athing submission">  <!-- rank, title, url -->
+  <td><span class="rank">1.</span></td>
+  <td><span class="titleline"><a href="https://example.com">Example Title</a></span></td>
+</tr>
+<tr>                             <!-- score, author, comments (sibling!) -->
+  <td class="subtext">
+    <span class="score">100 points</span>
+    <a class="hnuser">johndoe</a>
+  </td>
+</tr>
+```
+
+Normally, field selectors only search **descendants** of the base element — siblings are unreachable. The `source` field key solves this by navigating to a sibling element before running the selector.
+
+### Syntax
+
+```
+"source": "+ <selector>"
+```
+
+- **`+ tr`** — next sibling `<tr>`
+- **`+ div.details`** — next sibling `<div>` with class `details`
+- **`+ .subtext`** — next sibling with class `subtext`
+
+### Example: Hacker News
+
+```python
+schema = {
+    "name": "HN Submissions",
+    "baseSelector": "tr.athing.submission",
+    "fields": [
+        {"name": "rank", "selector": "span.rank", "type": "text"},
+        {"name": "title", "selector": "span.titleline a", "type": "text"},
+        {"name": "url", "selector": "span.titleline a", "type": "attribute", "attribute": "href"},
+        {"name": "score", "selector": "span.score", "type": "text", "source": "+ tr"},
+        {"name": "author", "selector": "a.hnuser", "type": "text", "source": "+ tr"},
+    ],
+}
+
+strategy = JsonCssExtractionStrategy(schema)
+```
+
+The `score` and `author` fields first navigate to the next sibling `<tr>`, then run their selectors inside that element. Fields without `source` work as before — searching descendants of the base element.
+
+`source` works with all field types (`text`, `attribute`, `nested`, `list`, etc.) and with both `JsonCssExtractionStrategy` and `JsonXPathExtractionStrategy`. If the sibling isn't found, the field returns its `default` value.
+
+---
+
+## 9. Tips & Best Practices
 
 1. **Inspect the DOM** in Chrome DevTools or Firefox's Inspector to find stable selectors.  
 2. **Start Simple**: Verify you can extract a single field. Then add complexity like nested objects or lists.  
@@ -636,7 +690,7 @@ Then run with `JsonCssExtractionStrategy(schema)` to get an array of blog post o
 
 ---
 
-## 9. Schema Generation Utility
+## 10. Schema Generation Utility
 
 While manually crafting schemas is powerful and precise, Crawl4AI now offers a convenient utility to **automatically generate** extraction schemas using LLM. This is particularly useful when:
 
@@ -669,7 +723,7 @@ html = """
 # Option 1: Using OpenAI (requires API token)
 css_schema = JsonCssExtractionStrategy.generate_schema(
     html,
-    schema_type="css", 
+    schema_type="css",
     llm_config = LLMConfig(provider="openai/gpt-4o",api_token="your-openai-token")
 )
 
@@ -683,6 +737,29 @@ xpath_schema = JsonXPathExtractionStrategy.generate_schema(
 # Use the generated schema for fast, repeated extractions
 strategy = JsonCssExtractionStrategy(css_schema)
 ```
+
+### Schema Validation
+
+By default, `generate_schema` **validates** the generated schema against the HTML to ensure that it actually extracts the data you expect. If the schema doesn't produce results, it automatically refines the selectors before returning.
+
+You can control this with the `validate` parameter:
+
+```python
+# Default: validated (recommended)
+schema = JsonCssExtractionStrategy.generate_schema(
+    url="https://news.ycombinator.com",
+    query="Extract each story: title, url, score, author",
+)
+
+# Skip validation if you want raw LLM output
+schema = JsonCssExtractionStrategy.generate_schema(
+    url="https://news.ycombinator.com",
+    query="Extract each story: title, url, score, author",
+    validate=False,
+)
+```
+
+The generator also understands sibling layouts — for sites like Hacker News where data is split across sibling elements, it will automatically use the [`source` field](#sibling-data) to reach sibling data.
 
 ### LLM Provider Options
 
@@ -814,7 +891,7 @@ This approach lets you generate schemas once that work reliably across hundreds 
 
 ---
 
-## 10. Conclusion
+## 11. Conclusion
 
 With Crawl4AI's LLM-free extraction strategies - `JsonCssExtractionStrategy`, `JsonXPathExtractionStrategy`, and now `RegexExtractionStrategy` - you can build powerful pipelines that:
 

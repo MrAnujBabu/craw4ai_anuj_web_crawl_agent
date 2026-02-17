@@ -1748,6 +1748,7 @@ def perform_completion_with_backoff(
     base_delay=2,
     max_attempts=3,
     exponential_factor=2,
+    messages=None,
     **kwargs,
 ):
     """
@@ -1789,7 +1790,7 @@ def perform_completion_with_backoff(
         try:
             response = completion(
                 model=provider,
-                messages=[{"role": "user", "content": prompt_with_variables}],
+                messages=messages if messages is not None else [{"role": "user", "content": prompt_with_variables}],
                 **extra_args,
             )
             return response  # Return the successful response
@@ -1839,6 +1840,7 @@ async def aperform_completion_with_backoff(
     base_delay=2,
     max_attempts=3,
     exponential_factor=2,
+    messages=None,
     **kwargs,
 ):
     """
@@ -1881,7 +1883,7 @@ async def aperform_completion_with_backoff(
         try:
             response = await acompletion(
                 model=provider,
-                messages=[{"role": "user", "content": prompt_with_variables}],
+                messages=messages if messages is not None else [{"role": "user", "content": prompt_with_variables}],
                 **extra_args,
             )
             return response  # Return the successful response

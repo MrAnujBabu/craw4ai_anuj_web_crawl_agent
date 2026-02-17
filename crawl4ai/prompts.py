@@ -298,6 +298,7 @@ Your output must always be a JSON object with this structure:
       "attribute": "attribute_name",  // Optional
       "transform": "transformation_type",  // Optional
       "pattern": "regex_pattern",  // Optional
+      "source": "+ sibling_selector",  // Optional — navigate to sibling element first
       "fields": []  // For nested/list types
     }
   ]
@@ -312,16 +313,26 @@ Available field types:
 - list: Array of similar items
 - regex: Pattern-based extraction
 
+Optional field keys:
+- source: Navigate to a sibling element before running the selector.
+  Syntax: "+ <css_selector>" — finds the next sibling matching the selector.
+  Example: "source": "+ tr" finds the next sibling <tr> of the base element.
+  Example: "source": "+ tr.subtext" finds the next sibling <tr> with class "subtext".
+  The field's selector then runs inside the resolved sibling element.
+  Use this when a logical item's data is split across sibling elements (e.g. table rows).
+
 CRITICAL - How selectors work at each level:
 - baseSelector runs against the FULL document and returns all matching elements.
 - Field selectors run INSIDE each base element (descendants only, not siblings).
 - This means a field selector will NEVER match sibling elements of the base element.
+- To reach sibling data, use the "source" key to navigate to the sibling first.
 - Therefore: NEVER use the same (or equivalent) selector as baseSelector in a field.
   It would search for the element inside itself, which returns nothing for flat/sibling layouts.
 
 When repeating items are siblings (e.g. table rows, flat divs):
 - CORRECT: Use baseSelector to match each item, then use flat fields (text/attribute) to extract data directly from within each item.
 - WRONG: Using baseSelector as a "list" field selector inside itself — this produces empty arrays.
+- For data in sibling elements: Use "source" to navigate to the sibling, then extract from there.
 </type_definitions>
 
 <behavior_rules>
@@ -651,6 +662,37 @@ CORRECT Schema (flat fields directly on base element):
     {"name": "link", "selector": ".title a", "type": "attribute", "attribute": "href"}
   ]
 }
+
+8. Sibling Data Example (data split across sibling elements):
+<html>
+<table>
+  <tr class="athing submission">
+    <td class="title"><span class="rank">1.</span></td>
+    <td><span class="titleline"><a href="https://example.com">Example Title</a></span></td>
+  </tr>
+  <tr>
+    <td colspan="2"></td>
+    <td class="subtext">
+      <span class="score">100 points</span>
+      <a class="hnuser">johndoe</a>
+      <a>50 comments</a>
+    </td>
+  </tr>
+</table>
+</html>
+
+Generated Schema (using "source" to reach sibling row):
+{
+  "name": "HN Submissions",
+  "baseSelector": "tr.athing.submission",
+  "fields": [
+    {"name": "rank", "selector": "span.rank", "type": "text"},
+    {"name": "title", "selector": "span.titleline a", "type": "text"},
+    {"name": "url", "selector": "span.titleline a", "type": "attribute", "attribute": "href"},
+    {"name": "score", "selector": "span.score", "type": "text", "source": "+ tr"},
+    {"name": "author", "selector": "a.hnuser", "type": "text", "source": "+ tr"}
+  ]
+}
 </examples>
 
 
@@ -719,6 +761,7 @@ Your output must always be a JSON object with this structure:
      "attribute": "attribute_name",  // Optional
      "transform": "transformation_type",  // Optional
      "pattern": "regex_pattern",  // Optional
+     "source": "+ sibling_selector",  // Optional — navigate to sibling element first
      "fields": []  // For nested/list types
    }
  ]
@@ -733,16 +776,26 @@ Available field types:
 - list: Array of similar items
 - regex: Pattern-based extraction
 
+Optional field keys:
+- source: Navigate to a sibling element before running the selector.
+  Syntax: "+ <selector>" — finds the next sibling matching the selector.
+  Example: "source": "+ tr" finds the next sibling <tr> of the base element.
+  Example: "source": "+ tr.subtext" finds the next sibling <tr> with class "subtext".
+  The field's selector then runs inside the resolved sibling element.
+  Use this when a logical item's data is split across sibling elements (e.g. table rows).
+
 CRITICAL - How selectors work at each level:
 - baseSelector runs against the FULL document and returns all matching elements.
 - Field selectors run INSIDE each base element (descendants only, not siblings).
 - This means a field selector will NEVER match sibling elements of the base element.
+- To reach sibling data, use the "source" key to navigate to the sibling first.
 - Therefore: NEVER use the same (or equivalent) selector as baseSelector in a field.
   It would search for the element inside itself, which returns nothing for flat/sibling layouts.
 
 When repeating items are siblings (e.g. table rows, flat divs):
 - CORRECT: Use baseSelector to match each item, then use flat fields (text/attribute) to extract data directly from within each item.
 - WRONG: Using baseSelector as a "list" field selector inside itself — this produces empty arrays.
+- For data in sibling elements: Use "source" to navigate to the sibling, then extract from there.
 </type_definitions>
 
 <behavior_rules>
@@ -1070,6 +1123,37 @@ CORRECT Schema (flat fields directly on base element):
   "fields": [
     {"name": "title", "selector": ".//td[@class='title']/a", "type": "text"},
     {"name": "link", "selector": ".//td[@class='title']/a", "type": "attribute", "attribute": "href"}
+  ]
+}
+
+8. Sibling Data Example (data split across sibling elements):
+<html>
+<table>
+  <tr class="athing submission">
+    <td class="title"><span class="rank">1.</span></td>
+    <td><span class="titleline"><a href="https://example.com">Example Title</a></span></td>
+  </tr>
+  <tr>
+    <td colspan="2"></td>
+    <td class="subtext">
+      <span class="score">100 points</span>
+      <a class="hnuser">johndoe</a>
+      <a>50 comments</a>
+    </td>
+  </tr>
+</table>
+</html>
+
+Generated Schema (using "source" to reach sibling row):
+{
+  "name": "HN Submissions",
+  "baseSelector": "//tr[contains(@class, 'athing') and contains(@class, 'submission')]",
+  "fields": [
+    {"name": "rank", "selector": ".//span[@class='rank']", "type": "text"},
+    {"name": "title", "selector": ".//span[@class='titleline']/a", "type": "text"},
+    {"name": "url", "selector": ".//span[@class='titleline']/a", "type": "attribute", "attribute": "href"},
+    {"name": "score", "selector": ".//span[@class='score']", "type": "text", "source": "+ tr"},
+    {"name": "author", "selector": ".//a[@class='hnuser']", "type": "text", "source": "+ tr"}
   ]
 }
 </examples>
