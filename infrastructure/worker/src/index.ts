@@ -44,8 +44,8 @@ export interface Env {
 export class CrawlerContainer extends Container {
 	defaultPort = 8000;
 
-	// Keep container alive for 30 min of idle time (crawls can be long)
-	sleepAfter = "30m";
+	// Keep container alive for 5 min of idle time
+	sleepAfter = "5m";
 
 	override onStart(): void {
 		console.log("[CrawlerContainer] Container started");

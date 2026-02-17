@@ -137,7 +137,7 @@ Full schema: `infrastructure/d1-schema.sql`
 - **Runtime:** Python 3.11 + Chromium (via Playwright)
 - **Port:** 8000 (HTTP server)
 - **Instance type:** `standard-1` (needs CPU + memory for headless browser)
-- **Sleep timeout:** 30 minutes idle → container sleeps (saves cost)
+- **Sleep timeout:** 5 minutes idle → container sleeps (saves cost)
 - **Max instances:** 10 concurrent crawl jobs
 
 ### Container endpoints (internal, called by Worker):
