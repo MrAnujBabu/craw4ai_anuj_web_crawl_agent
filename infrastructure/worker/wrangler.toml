@@ -6,7 +6,7 @@ compatibility_flags = ["nodejs_compat"]
 # ─── Cloudflare Container (crawl4ai + SEO audit) ─────────────────────
 [[containers]]
 class_name = "CrawlerContainer"
-image = "../docker"                  # path to Dockerfile directory
+image = "../docker/Dockerfile"        # path to Dockerfile
 max_instances = 10
 instance_type = "standard-1"        # need CPU + memory for browser
 
