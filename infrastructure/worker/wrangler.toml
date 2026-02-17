@@ -39,6 +39,15 @@ database_id = "4b98d8a3-fb04-45db-985d-58e041aceb5b"
 binding = "SNAPSHOTS"
 bucket_name = "seo-audit-snapshots"
 
+# ─── Observability ──────────────────────────────────────────────────
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
 # ─── Secrets (set via: wrangler secret put API_KEY) ───────────────────
 
 [vars]
