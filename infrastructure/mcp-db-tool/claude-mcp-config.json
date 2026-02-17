@@ -1,6 +1,17 @@
 {
   "mcpServers": {
     "seo-audit": {
+      "_comment": "Option A: Direct MCP connection (recommended — no local process needed)",
+      "type": "url",
+      "url": "https://seo-audit-gateway.YOUR-SUBDOMAIN.workers.dev/mcp/YOUR-API-KEY"
+    },
+    "seo-audit-sse": {
+      "_comment": "Option B: SSE transport (if your MCP client doesn't support streamable HTTP)",
+      "type": "url",
+      "url": "https://seo-audit-gateway.YOUR-SUBDOMAIN.workers.dev/sse/YOUR-API-KEY"
+    },
+    "seo-audit-stdio": {
+      "_comment": "Option C: Local stdio fallback (for Claude Desktop or Claude Code)",
       "command": "node",
       "args": ["/path/to/infrastructure/mcp-db-tool/index.js"],
       "env": {

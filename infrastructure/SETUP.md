@@ -3,57 +3,52 @@
 ## Architecture
 
 ```
-Claude (MCP tool)
+Claude (MCP client)
     │
-    ▼
-CF Worker (API gateway + Bearer token auth + D1 writes)
+    ├──→ MCP over HTTP ──→ CF Worker (SEOAuditMcpAgent DO)
+    │                          │
+    │                          ├──→ Cloudflare D1  (structured audit data)
+    │                          ├──→ Cloudflare R2  (raw HTML snapshots)
+    │                          └──→ CF Container   (crawl4ai + SEO audit)
+    │                                    │
+    │                                    ▼
+    │                               Python HTTP server on port 8000
+    │                               running crawl4ai + SEOAnalyzer
     │
-    ├──→ Cloudflare D1  (structured audit data)
-    ├──→ Cloudflare R2  (raw HTML snapshots)
-    └──→ CF Container   (crawl4ai + SEO audit, one per job)
-              │
-              ▼
-         Python HTTP server on port 8000
-         running crawl4ai + SEOAnalyzer
+    └──→ (alt) MCP stdio ──→ mcp-db-tool ──REST──→ CF Worker
 ```
 
-**Key design:** Each crawl job gets its own Container instance (Durable Object keyed by job_id). The Worker is the only thing that talks to D1. The container runs the crawl and exposes results via HTTP; the Worker polls `/status` and ingests results when done.
+**Key design:** The Worker is both an MCP server (via Cloudflare Agents SDK) and a REST API gateway. Claude connects directly via MCP — no local process needed. Each crawl job gets its own Container instance (Durable Object keyed by job_id).
 
-**Security:** Every request to the Worker must include `Authorization: Bearer <token>`. The token is stored as a Cloudflare secret — it never appears in code or config files. Requests without a valid token get a 401 response.
+**Auth:** Token in URL path for MCP (`/mcp/<token>`), Bearer header for REST API. Token stored as Cloudflare secret.
 
 ---
 
-## Step-by-Step Setup via Cloudflare Dashboard
+## Step-by-Step Setup
 
 ### Step 1: Create a D1 Database
 
 1. Log into [dash.cloudflare.com](https://dash.cloudflare.com)
-2. In the left sidebar, go to **Workers & Pages** → **D1 SQL Database**
-3. Click **Create database**
-4. Name it `seo-audit-db`
-5. Choose a location (or leave as automatic)
-6. Click **Create**
-7. **Copy the Database ID** from the overview page — you'll need it for `wrangler.toml`
+2. Go to **Workers & Pages** → **D1 SQL Database**
+3. Click **Create database**, name it `seo-audit-db`
+4. **Copy the Database ID** — you'll need it for `wrangler.toml`
 
 ### Step 2: Initialize the D1 Schema
 
-1. On your D1 database page, click the **Console** tab
-2. Open `infrastructure/d1-schema.sql` from this repo
-3. Paste the entire SQL into the console
-4. Click **Execute** (or run it in batches if the console limits statement count)
-5. Verify the tables exist: run `SELECT name FROM sqlite_master WHERE type='table';`
+1. On your D1 database page, click **Console**
+2. Paste the contents of `infrastructure/d1-schema.sql`
+3. Click **Execute**
+4. Verify: `SELECT name FROM sqlite_master WHERE type='table';`
 
 You should see: `crawl_jobs`, `page_audits`, `site_issues`, `site_summaries`
 
 ### Step 3: Create an R2 Bucket
 
-1. In the left sidebar, go to **R2 Object Storage**
-2. Click **Create bucket**
-3. Name it `seo-audit-snapshots`
-4. Leave defaults (Standard storage class, automatic location)
-5. Click **Create bucket**
+1. Go to **R2 Object Storage**
+2. Click **Create bucket**, name it `seo-audit-snapshots`
+3. Leave defaults
 
-### Step 4: Update wrangler.toml with your IDs
+### Step 4: Update wrangler.toml
 
 Open `infrastructure/worker/wrangler.toml` and fill in your D1 database ID:
 
@@ -64,80 +59,102 @@ database_name = "seo-audit-db"
 database_id = "paste-your-database-id-here"
 ```
 
-### Step 5: Generate an API Key (Bearer Token)
-
-Generate a strong random token. This is the shared secret between the MCP tool and the Worker:
+### Step 5: Generate an API Key
 
 ```bash
-# Option A: openssl
 openssl rand -hex 32
-
-# Option B: python
-python3 -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-**Save this token** — you'll set it as a secret in Step 6 and use it in the MCP config in Step 8.
+Save this token — it's the shared secret for both MCP and REST auth.
 
-### Step 6: Deploy the Worker + Container
+### Step 6: Deploy
 
 ```bash
-# Install wrangler v4+ (if not already installed)
-npm install -g wrangler
-
-# Login to your Cloudflare account
-wrangler login
-
-# Install worker dependencies
-cd infrastructure/worker
-npm install
-
-# Deploy — this builds the Docker image, pushes it to CF registry,
-# and deploys the Worker with Container binding
-npm run deploy
+cd infrastructure
+./deploy.sh
 ```
+
+This script:
+1. Copies `crawl4ai/` source into the Docker build context
+2. Installs Worker dependencies
+3. Deploys the Worker + Container to Cloudflare
 
 **Requirements:**
-- Docker must be running locally (wrangler builds the image with Docker)
-- First deploy takes several minutes (image build + push + container provisioning)
-- After the first deploy, wait ~3-5 minutes before the container is ready
+- Docker running locally (wrangler builds the container image)
+- `wrangler login` completed
+- First deploy takes several minutes (image build + push)
 
 ### Step 7: Set the API Key Secret
 
-After deployment, set your Bearer token as an encrypted secret:
-
-**Option A: CLI (recommended)**
 ```bash
+cd infrastructure/worker
 wrangler secret put API_KEY
-# Paste your token from Step 5 when prompted
+# Paste your token when prompted
 ```
 
-**Option B: Dashboard**
-1. Go to **Workers & Pages** in the sidebar
-2. Click on **seo-audit-gateway**
-3. Go to **Settings** → **Variables and Secrets**
-4. Under **Secrets**, click **Add**
-5. Name: `API_KEY`
-6. Value: paste your token from Step 5
-7. Click **Save and deploy**
+Or via Dashboard: **Workers & Pages** → **seo-audit-gateway** → **Settings** → **Variables and Secrets** → Add secret `API_KEY`.
 
-### Step 8: Verify the Deployment
-
-Test that auth works:
+### Step 8: Verify
 
 ```bash
-# Should return 401 Unauthorized
-curl https://seo-audit-gateway.<your-subdomain>.workers.dev/jobs
+# Health check (no auth required)
+curl https://seo-audit-gateway.<your-subdomain>.workers.dev/health
 
-# Should return {"jobs": []}
+# REST API (should return {"jobs": []})
 curl -H "Authorization: Bearer <your-token>" \
   https://seo-audit-gateway.<your-subdomain>.workers.dev/jobs
+
+# MCP without token (should return 403)
+curl https://seo-audit-gateway.<your-subdomain>.workers.dev/mcp
+
+# MCP with bad token (should return 403)
+curl -X POST https://seo-audit-gateway.<your-subdomain>.workers.dev/mcp/bad-token
 ```
 
-Your Worker URL is shown in the Cloudflare dashboard under **Workers & Pages** → **seo-audit-gateway** → **Overview**.
+---
 
-### Step 9: Configure the MCP Tool for Claude
+## Connecting Claude
 
-Add to your Claude Code MCP config (`~/.claude/mcp.json` or project `.mcp.json`):
+### Option A: Direct MCP (Recommended)
+
+No local setup needed. Add to your MCP config (`~/.claude/mcp.json` or project `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "seo-audit": {
+      "type": "url",
+      "url": "https://seo-audit-gateway.<your-subdomain>.workers.dev/mcp/<your-token>"
+    }
+  }
+}
+```
+
+This uses the same pattern as the DataForSEO MCP server — token in URL path, MCP over streamable HTTP.
+
+### Option B: SSE Transport
+
+If your MCP client only supports SSE:
+
+```json
+{
+  "mcpServers": {
+    "seo-audit": {
+      "type": "url",
+      "url": "https://seo-audit-gateway.<your-subdomain>.workers.dev/sse/<your-token>"
+    }
+  }
+}
+```
+
+### Option C: Stdio Fallback (Claude Desktop / Claude Code)
+
+For local stdio transport:
+
+```bash
+cd infrastructure/mcp-db-tool
+npm install
+```
 
 ```json
 {
@@ -147,87 +164,45 @@ Add to your Claude Code MCP config (`~/.claude/mcp.json` or project `.mcp.json`)
       "args": ["/absolute/path/to/infrastructure/mcp-db-tool/index.js"],
       "env": {
         "GATEWAY_URL": "https://seo-audit-gateway.<your-subdomain>.workers.dev",
-        "API_KEY": "<your-token-from-step-5>"
+        "API_KEY": "<your-token>"
       }
     }
   }
 }
 ```
 
-Install MCP tool dependencies:
-```bash
-cd infrastructure/mcp-db-tool
-npm install
-```
+---
+
+## Security
+
+### Token Auth
+- **MCP routes:** Token in URL path (`/mcp/<token>`, `/sse/<token>`)
+- **REST routes:** Bearer token in header (`Authorization: Bearer <token>`)
+- **Storage:** Cloudflare Secret (encrypted at rest, never visible after creation)
+- **Container:** Not directly accessible from internet — only via Worker DO binding
+- **D1/R2:** Not publicly accessible — Worker only
+
+### Rotating the Token
+1. Generate new token: `openssl rand -hex 32`
+2. Update secret: `wrangler secret put API_KEY`
+3. Update your MCP config URL with the new token
+4. Restart Claude to pick up the new config
 
 ---
 
-## Security: How Token Auth Works
+## Available Tools
 
-The Worker checks every incoming request for a valid Bearer token:
-
-```
-Authorization: Bearer <token>
-```
-
-- The token is stored as a **Cloudflare Secret** (`API_KEY`) — encrypted at rest, never visible in dashboard after creation, not in source code
-- The MCP tool sends this token with every request via the `API_KEY` env var
-- Requests without a valid token receive `401 Unauthorized`
-- The Container is **not directly accessible** from the internet — it only receives requests proxied through the Worker's Durable Object binding
-- D1 and R2 are also not publicly accessible — only the Worker can read/write them
-
-**To rotate the token:**
-1. Generate a new token: `openssl rand -hex 32`
-2. Update the secret: `wrangler secret put API_KEY` (paste new token)
-3. Update your MCP config with the new token
-4. Restart Claude Code to pick up the new MCP config
-
----
-
-## Managing via Dashboard After Deploy
-
-### View Worker Logs
-1. **Workers & Pages** → **seo-audit-gateway** → **Logs** → **Real-time logs**
-2. Open a new tab and send a request — you'll see it stream in
-3. Container lifecycle events (`onStart`, `onStop`, `onError`) appear here too
-
-### View Container Status
-1. **Workers & Pages** → **seo-audit-gateway** → **Containers** tab
-2. Shows active instances, resource usage, and container logs
-
-### Query D1 Data
-1. **Workers & Pages** → **D1 SQL Database** → **seo-audit-db**
-2. Click **Console** tab
-3. Run queries like:
-   ```sql
-   SELECT id, domain, status, score FROM crawl_jobs ORDER BY created_at DESC LIMIT 10;
-   ```
-
-### Browse R2 Snapshots
-1. **R2 Object Storage** → **seo-audit-snapshots**
-2. Files are stored as `<job-id>/<encoded-url>.html`
-
-### Update Environment Variables
-1. **Workers & Pages** → **seo-audit-gateway** → **Settings** → **Variables and Secrets**
-2. **Variables** (plain text): `ENVIRONMENT`, `MAX_PAGES_DEFAULT`, `MAX_DEPTH_DEFAULT`
-3. **Secrets** (encrypted): `API_KEY`
-
----
-
-## Usage Flow
-
-Once configured, Claude has 6 tools:
-
-| Tool | Purpose |
-|------|---------|
+| Tool | Description |
+|------|-------------|
 | `submit_crawl` | Start a crawl — spins up a CF Container |
 | `poll_job` | Poll live progress from the running container |
 | `list_jobs` | List jobs by domain/status |
 | `get_job` | Get job summary + SEO score |
 | `get_issues` | Get all SEO issues (filterable by severity) |
+| `get_pages` | Get page-level audit details |
 | `query_db` | Run custom SQL against D1 |
 
-### Example conversation:
+### Example Conversation
 
 > **You:** "Run an SEO audit on example.com"
 
@@ -235,7 +210,8 @@ Once configured, Claude has 6 tools:
 2. Claude uses `poll_job(job_id)` → sees "running, 12/50 pages"
 3. Claude uses `poll_job(job_id)` → sees "completed, score 73/100"
 4. Claude uses `get_issues(job_id, severity="critical")` → reports findings
-5. Claude uses `query_db` for deeper analysis
+5. Claude uses `get_pages(job_id, problems_only=true)` → shows problem pages
+6. Claude uses `query_db` for deeper analysis
 
 ---
 
@@ -261,11 +237,11 @@ Full schema: `infrastructure/d1-schema.sql`
 - **Image:** Built from `infrastructure/docker/Dockerfile`
 - **Runtime:** Python 3.11 + Chromium (via Playwright)
 - **Port:** 8000 (HTTP server)
-- **Instance type:** `standard-1` (needs CPU + memory for headless browser)
+- **Instance type:** `standard-1` (CPU + memory for headless browser)
 - **Sleep timeout:** 5 minutes idle → container sleeps (saves cost)
 - **Max instances:** 10 concurrent crawl jobs
 
-### Container endpoints (internal, called by Worker only):
+### Container Endpoints (internal, Worker-only):
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
@@ -273,4 +249,21 @@ Full schema: `infrastructure/d1-schema.sql`
 | `/status` | GET | Progress + results when done |
 | `/health` | GET | Liveness check |
 
-These endpoints are **not accessible from the internet**. Only the Worker's Durable Object can reach them via the internal container binding.
+---
+
+## Dashboard Management
+
+### View Worker Logs
+**Workers & Pages** → **seo-audit-gateway** → **Logs** → **Real-time logs**
+
+### View Container Status
+**Workers & Pages** → **seo-audit-gateway** → **Containers** tab
+
+### Query D1 Data
+**D1 SQL Database** → **seo-audit-db** → **Console**
+
+### Browse R2 Snapshots
+**R2 Object Storage** → **seo-audit-snapshots** (files stored as `<job-id>/<encoded-url>.html`)
+
+### Update Secrets
+**Workers & Pages** → **seo-audit-gateway** → **Settings** → **Variables and Secrets**

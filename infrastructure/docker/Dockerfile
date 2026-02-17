@@ -16,10 +16,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN playwright install chromium --with-deps
 
 # Copy crawl4ai source (with seo_audit layer)
+# NOTE: The deploy script copies crawl4ai/ into this directory before build.
+# See infrastructure/deploy.sh
 COPY crawl4ai/ ./crawl4ai/
 
 # Copy the HTTP server
-COPY infrastructure/docker/server.py .
+COPY server.py .
 
 EXPOSE 8000
 

@@ -1,6 +1,7 @@
 name = "seo-audit-gateway"
 main = "src/index.ts"
 compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
 
 # ─── Cloudflare Container (crawl4ai + SEO audit) ─────────────────────
 [[containers]]
@@ -9,13 +10,23 @@ image = "../docker"                  # path to Dockerfile directory
 max_instances = 10
 instance_type = "standard-1"        # need CPU + memory for browser
 
+# ─── Durable Object Bindings ─────────────────────────────────────────
 [[durable_objects.bindings]]
 name = "CRAWLER"
 class_name = "CrawlerContainer"
 
+[[durable_objects.bindings]]
+name = "MCP_OBJECT"
+class_name = "SEOAuditMcpAgent"
+
+# ─── Migrations ──────────────────────────────────────────────────────
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["CrawlerContainer"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["SEOAuditMcpAgent"]
 
 # ─── D1 Database ──────────────────────────────────────────────────────
 [[d1_databases]]
