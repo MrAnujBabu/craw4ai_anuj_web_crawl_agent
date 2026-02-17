@@ -1,25 +1,68 @@
 /**
- * SEO Audit Gateway — Cloudflare Worker
+ * SEO Audit Gateway — Cloudflare Worker + Container
  *
- * Routes:
- *   POST /crawl           Submit a new crawl job
- *   GET  /jobs             List jobs (filterable by domain, status)
- *   GET  /jobs/:id         Get job details + summary
- *   GET  /jobs/:id/pages   Get page-level audit results
- *   GET  /jobs/:id/issues  Get issues for a job
- *   GET  /query            Raw SQL query (read-only, for the MCP DB tool)
- *   POST /jobs/:id/results Worker-internal: Docker container posts results here
+ * The Worker is the API gateway. Each crawl job gets its own Container
+ * instance (Durable Object), identified by job_id. The Container runs
+ * crawl4ai + SEO audit inside a Docker image.
+ *
+ * Flow:
+ *   1. POST /crawl          → Worker creates job in D1, spawns Container by job_id
+ *   2. Container runs audit  → POSTs results to its own /results endpoint
+ *   3. CrawlerContainer.onStart() → container HTTP server starts listening
+ *   4. Worker proxies /start to container, which begins the crawl
+ *   5. Container finishes    → calls back to the DO, which writes to D1
+ *
+ * Query routes (for the MCP DB tool):
+ *   GET  /jobs               List jobs
+ *   GET  /jobs/:id           Get job + summary
+ *   GET  /jobs/:id/pages     Get page audits
+ *   GET  /jobs/:id/issues    Get issues
+ *   GET  /jobs/:id/status    Poll container status
+ *   GET  /query              Read-only SQL
  */
+
+import { Container } from "@cloudflare/containers";
+
+// ═══════════════════════════════════════════════════════════════════════
+// Types
+// ═══════════════════════════════════════════════════════════════════════
 
 export interface Env {
 	DB: D1Database;
 	SNAPSHOTS: R2Bucket;
+	CRAWLER: DurableObjectNamespace;
 	API_KEY: string;
-	DOCKER_API_URL: string;
 	ENVIRONMENT: string;
 	MAX_PAGES_DEFAULT: string;
 	MAX_DEPTH_DEFAULT: string;
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// CrawlerContainer — Durable Object wrapping the Docker container
+// ═══════════════════════════════════════════════════════════════════════
+
+export class CrawlerContainer extends Container {
+	defaultPort = 8000;
+
+	// Keep container alive for 30 min of idle time (crawls can be long)
+	sleepAfter = "30m";
+
+	override onStart(): void {
+		console.log("[CrawlerContainer] Container started");
+	}
+
+	override onStop(): void {
+		console.log("[CrawlerContainer] Container stopped");
+	}
+
+	override onError(error: unknown): void {
+		console.error("[CrawlerContainer] Container error:", error);
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Worker — API Gateway
+// ═══════════════════════════════════════════════════════════════════════
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -63,21 +106,20 @@ export default {
 				return handleGetIssues(issuesMatch[1], url, env);
 			}
 
+			// ── GET /jobs/:id/status ─────────────────────────────
+			const statusMatch = path.match(/^\/jobs\/([a-f0-9-]+)\/status$/);
+			if (method === "GET" && statusMatch) {
+				return handlePollStatus(statusMatch[1], env);
+			}
+
 			// ── GET /query ───────────────────────────────────────
-			// Read-only SQL for the MCP DB query tool
 			if (method === "GET" && path === "/query") {
 				return handleQuery(url, env);
 			}
 
-			// ── POST /jobs/:id/results ───────────────────────────
-			// Internal: Docker container posts results here
-			const resultsMatch = path.match(/^\/jobs\/([a-f0-9-]+)\/results$/);
-			if (method === "POST" && resultsMatch) {
-				return handlePostResults(resultsMatch[1], request, env);
-			}
-
 			return json({ error: "Not found" }, 404);
 		} catch (err: any) {
+			console.error("Handler error:", err);
 			return json({ error: err.message || "Internal error" }, 500);
 		}
 	},
@@ -92,7 +134,6 @@ async function handleSubmitCrawl(request: Request, env: Env): Promise<Response> 
 		url: string;
 		max_pages?: number;
 		max_depth?: number;
-		config?: Record<string, unknown>;
 	};
 
 	if (!body.url) {
@@ -101,13 +142,11 @@ async function handleSubmitCrawl(request: Request, env: Env): Promise<Response> 
 
 	const domain = new URL(body.url).hostname;
 	const jobId = crypto.randomUUID();
-	const config = JSON.stringify({
-		max_pages: body.max_pages ?? parseInt(env.MAX_PAGES_DEFAULT),
-		max_depth: body.max_depth ?? parseInt(env.MAX_DEPTH_DEFAULT),
-		...body.config,
-	});
+	const maxPages = body.max_pages ?? parseInt(env.MAX_PAGES_DEFAULT);
+	const maxDepth = body.max_depth ?? parseInt(env.MAX_DEPTH_DEFAULT);
+	const config = JSON.stringify({ max_pages: maxPages, max_depth: maxDepth });
 
-	// Insert job
+	// 1. Create job record in D1
 	await env.DB.prepare(
 		`INSERT INTO crawl_jobs (id, domain, start_url, config, status)
 		 VALUES (?, ?, ?, ?, 'queued')`
@@ -115,30 +154,99 @@ async function handleSubmitCrawl(request: Request, env: Env): Promise<Response> 
 		.bind(jobId, domain, body.url, config)
 		.run();
 
-	// Trigger Docker container
+	// 2. Get a Container instance keyed by job_id
+	//    Each job gets its own container so crawls are isolated
+	const containerId = env.CRAWLER.idFromName(jobId);
+	const container = env.CRAWLER.get(containerId);
+
+	// 3. Send the crawl request to the container's HTTP server
+	//    The container image runs a Python HTTP server on port 8000
 	try {
-		await fetch(env.DOCKER_API_URL, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				job_id: jobId,
-				url: body.url,
-				config: JSON.parse(config),
-				callback_url: `${new URL(request.url).origin}/jobs/${jobId}/results`,
-			}),
-		});
-	} catch {
-		// If Docker trigger fails, mark job as failed
+		const containerResp = await container.fetch(
+			new Request("http://container/start", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					job_id: jobId,
+					url: body.url,
+					max_pages: maxPages,
+					max_depth: maxDepth,
+				}),
+			})
+		);
+
+		if (!containerResp.ok) {
+			const errText = await containerResp.text();
+			throw new Error(`Container rejected start: ${errText}`);
+		}
+
+		// Update job status to running
 		await env.DB.prepare(
-			`UPDATE crawl_jobs SET status = 'failed', error = 'Failed to start container'
+			`UPDATE crawl_jobs SET status = 'running', started_at = datetime('now')
 			 WHERE id = ?`
 		)
 			.bind(jobId)
 			.run();
-		return json({ error: "Failed to start crawler", job_id: jobId }, 502);
+	} catch (err: any) {
+		await env.DB.prepare(
+			`UPDATE crawl_jobs SET status = 'failed', error = ? WHERE id = ?`
+		)
+			.bind(`Container start failed: ${err.message}`, jobId)
+			.run();
+		return json({ error: "Failed to start crawler container", job_id: jobId }, 502);
 	}
 
-	return json({ job_id: jobId, status: "queued", domain }, 201);
+	return json({ job_id: jobId, status: "running", domain }, 201);
+}
+
+async function handlePollStatus(jobId: string, env: Env): Promise<Response> {
+	// First check D1 for the job
+	const job = await env.DB.prepare(
+		"SELECT id, status, score, pages_found, pages_done, error FROM crawl_jobs WHERE id = ?"
+	)
+		.bind(jobId)
+		.first();
+
+	if (!job) return json({ error: "Job not found" }, 404);
+
+	// If already completed or failed, just return from D1
+	if (job.status === "completed" || job.status === "failed") {
+		return json(job);
+	}
+
+	// Otherwise poll the container for live progress
+	try {
+		const containerId = env.CRAWLER.idFromName(jobId);
+		const container = env.CRAWLER.get(containerId);
+		const resp = await container.fetch(new Request("http://container/status"));
+
+		if (resp.ok) {
+			const containerStatus = (await resp.json()) as any;
+
+			// If container reports done, ingest results
+			if (containerStatus.status === "completed" && containerStatus.results) {
+				await ingestResults(jobId, containerStatus.results, env);
+				return json({
+					id: jobId,
+					status: "completed",
+					score: containerStatus.results.summary?.score,
+					pages_done: containerStatus.results.pages?.length ?? 0,
+				});
+			}
+
+			// Still running — return progress
+			return json({
+				id: jobId,
+				status: "running",
+				pages_done: containerStatus.pages_done ?? 0,
+				pages_found: containerStatus.pages_found ?? 0,
+			});
+		}
+	} catch {
+		// Container might not be ready yet
+	}
+
+	return json(job);
 }
 
 async function handleListJobs(url: URL, env: Env): Promise<Response> {
@@ -146,7 +254,8 @@ async function handleListJobs(url: URL, env: Env): Promise<Response> {
 	const status = url.searchParams.get("status");
 	const limit = Math.min(parseInt(url.searchParams.get("limit") || "20"), 100);
 
-	let query = "SELECT id, domain, start_url, status, score, pages_found, pages_done, created_at, completed_at FROM crawl_jobs WHERE 1=1";
+	let query =
+		"SELECT id, domain, start_url, status, score, pages_found, pages_done, created_at, completed_at FROM crawl_jobs WHERE 1=1";
 	const params: string[] = [];
 
 	if (domain) {
@@ -166,15 +275,12 @@ async function handleListJobs(url: URL, env: Env): Promise<Response> {
 }
 
 async function handleGetJob(jobId: string, env: Env): Promise<Response> {
-	const job = await env.DB.prepare(
-		"SELECT * FROM crawl_jobs WHERE id = ?"
-	)
+	const job = await env.DB.prepare("SELECT * FROM crawl_jobs WHERE id = ?")
 		.bind(jobId)
 		.first();
 
 	if (!job) return json({ error: "Job not found" }, 404);
 
-	// Also fetch summary if completed
 	const summary = await env.DB.prepare(
 		"SELECT * FROM site_summaries WHERE job_id = ?"
 	)
@@ -191,10 +297,10 @@ async function handleGetPages(
 ): Promise<Response> {
 	const limit = Math.min(parseInt(url.searchParams.get("limit") || "50"), 200);
 	const offset = parseInt(url.searchParams.get("offset") || "0");
-	const problems_only = url.searchParams.get("problems_only") === "true";
+	const problemsOnly = url.searchParams.get("problems_only") === "true";
 
 	let query: string;
-	if (problems_only) {
+	if (problemsOnly) {
 		query = `SELECT id, url, domain, status_code, title, title_status, meta_desc_status,
 		         h1_count, has_canonical, is_indexable, word_count, images_no_alt, mixed_content,
 		         created_at
@@ -211,10 +317,7 @@ async function handleGetPages(
 		         ORDER BY url LIMIT ? OFFSET ?`;
 	}
 
-	const result = await env.DB.prepare(query)
-		.bind(jobId, limit, offset)
-		.all();
-
+	const result = await env.DB.prepare(query).bind(jobId, limit, offset).all();
 	return json({ pages: result.results, count: result.results?.length || 0 });
 }
 
@@ -233,7 +336,8 @@ async function handleGetIssues(
 		params.push(severity);
 	}
 
-	query += " ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END";
+	query +=
+		" ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END";
 
 	const result = await env.DB.prepare(query).bind(...params).all();
 	return json({ issues: result.results });
@@ -243,16 +347,10 @@ async function handleQuery(url: URL, env: Env): Promise<Response> {
 	const sql = url.searchParams.get("sql");
 	if (!sql) return json({ error: "sql parameter required" }, 400);
 
-	// Read-only enforcement: reject writes
+	// Read-only enforcement
 	const normalized = sql.trim().toUpperCase();
-	if (
-		normalized.startsWith("INSERT") ||
-		normalized.startsWith("UPDATE") ||
-		normalized.startsWith("DELETE") ||
-		normalized.startsWith("DROP") ||
-		normalized.startsWith("ALTER") ||
-		normalized.startsWith("CREATE")
-	) {
+	const forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "REPLACE"];
+	if (forbidden.some((kw) => normalized.startsWith(kw))) {
 		return json({ error: "Only SELECT queries allowed" }, 403);
 	}
 
@@ -264,31 +362,11 @@ async function handleQuery(url: URL, env: Env): Promise<Response> {
 	});
 }
 
-async function handlePostResults(
-	jobId: string,
-	request: Request,
-	env: Env
-): Promise<Response> {
-	const body = (await request.json()) as {
-		status: "completed" | "failed";
-		error?: string;
-		pages?: PageResult[];
-		summary?: SummaryResult;
-		issues?: IssueResult[];
-		snapshots?: { url: string; html: string }[];
-	};
+// ═══════════════════════════════════════════════════════════════════════
+// Result Ingestion — writes container output into D1
+// ═══════════════════════════════════════════════════════════════════════
 
-	// Update job status
-	if (body.status === "failed") {
-		await env.DB.prepare(
-			`UPDATE crawl_jobs SET status = 'failed', error = ?, completed_at = datetime('now')
-			 WHERE id = ?`
-		)
-			.bind(body.error || "Unknown error", jobId)
-			.run();
-		return json({ ok: true });
-	}
-
+async function ingestResults(jobId: string, results: any, env: Env): Promise<void> {
 	const domain =
 		(
 			await env.DB.prepare("SELECT domain FROM crawl_jobs WHERE id = ?")
@@ -297,7 +375,7 @@ async function handlePostResults(
 		)?.domain || "";
 
 	// Insert page audits
-	if (body.pages) {
+	if (results.pages?.length) {
 		const stmt = env.DB.prepare(
 			`INSERT INTO page_audits (id, job_id, url, domain, status_code,
 			 title, title_length, title_status, meta_desc, meta_desc_length, meta_desc_status,
@@ -307,7 +385,7 @@ async function handlePostResults(
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		);
 
-		const batch = body.pages.map((p) =>
+		const batch = results.pages.map((p: any) =>
 			stmt.bind(
 				crypto.randomUUID(),
 				jobId,
@@ -339,14 +417,14 @@ async function handlePostResults(
 	}
 
 	// Insert issues
-	if (body.issues) {
+	if (results.issues?.length) {
 		const stmt = env.DB.prepare(
 			`INSERT INTO site_issues (id, job_id, domain, issue_type, severity,
 			 description, fix, affected_count, affected_urls)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		);
 
-		const batch = body.issues.map((i) =>
+		const batch = results.issues.map((i: any) =>
 			stmt.bind(
 				crypto.randomUUID(),
 				jobId,
@@ -363,7 +441,8 @@ async function handlePostResults(
 	}
 
 	// Insert summary
-	if (body.summary) {
+	if (results.summary) {
+		const s = results.summary;
 		await env.DB.prepare(
 			`INSERT INTO site_summaries (id, job_id, domain, pages_audited, score,
 			 issues_critical, issues_warning, issues_info, audit_json)
@@ -373,25 +452,25 @@ async function handlePostResults(
 				crypto.randomUUID(),
 				jobId,
 				domain,
-				body.summary.pages_audited ?? 0,
-				body.summary.score ?? 0,
-				body.summary.issues_critical ?? 0,
-				body.summary.issues_warning ?? 0,
-				body.summary.issues_info ?? 0,
-				body.summary.audit_json ?? "{}"
+				s.pages_audited ?? 0,
+				s.score ?? 0,
+				s.issues_critical ?? 0,
+				s.issues_warning ?? 0,
+				s.issues_info ?? 0,
+				s.audit_json ?? "{}"
 			)
 			.run();
 	}
 
 	// Store HTML snapshots in R2
-	if (body.snapshots) {
-		for (const snap of body.snapshots) {
+	if (results.snapshots?.length) {
+		for (const snap of results.snapshots) {
 			const key = `${jobId}/${encodeURIComponent(snap.url)}.html`;
 			await env.SNAPSHOTS.put(key, snap.html);
 		}
 	}
 
-	// Update job as completed
+	// Mark job as completed
 	await env.DB.prepare(
 		`UPDATE crawl_jobs
 		 SET status = 'completed',
@@ -400,60 +479,8 @@ async function handlePostResults(
 		     completed_at = datetime('now')
 		 WHERE id = ?`
 	)
-		.bind(
-			body.pages?.length ?? 0,
-			body.summary?.score ?? null,
-			jobId
-		)
+		.bind(results.pages?.length ?? 0, results.summary?.score ?? null, jobId)
 		.run();
-
-	return json({ ok: true });
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// Types for result ingestion
-// ═══════════════════════════════════════════════════════════════════════
-
-interface PageResult {
-	url: string;
-	status_code?: number;
-	title?: string;
-	title_length?: number;
-	title_status?: string;
-	meta_desc?: string;
-	meta_desc_length?: number;
-	meta_desc_status?: string;
-	h1_count?: number;
-	has_canonical?: boolean;
-	is_indexable?: boolean;
-	has_json_ld?: boolean;
-	has_viewport?: boolean;
-	has_og_tags?: boolean;
-	word_count?: number;
-	images_total?: number;
-	images_no_alt?: number;
-	internal_links?: number;
-	external_links?: number;
-	mixed_content?: boolean;
-	audit_json?: string;
-}
-
-interface IssueResult {
-	issue_type: string;
-	severity: string;
-	description: string;
-	fix?: string;
-	affected_count?: number;
-	affected_urls?: string[];
-}
-
-interface SummaryResult {
-	pages_audited?: number;
-	score?: number;
-	issues_critical?: number;
-	issues_warning?: number;
-	issues_info?: number;
-	audit_json?: string;
 }
 
 // ═══════════════════════════════════════════════════════════════════════

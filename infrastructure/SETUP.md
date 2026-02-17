@@ -3,17 +3,26 @@
 ## Architecture
 
 ```
-Claude (MCP tool) ──→ CF Worker Gateway ──→ Docker Container (crawl4ai)
-                            │                        │
-                            ▼                        ▼
-                       Cloudflare D1 ◄───── results written
-                       (+ R2 for HTML)
+Claude (MCP tool)
+    │
+    ▼
+CF Worker (API gateway + auth + D1 writes)
+    │
+    ├──→ Cloudflare D1  (structured audit data)
+    ├──→ Cloudflare R2  (raw HTML snapshots)
+    └──→ CF Container   (crawl4ai + SEO audit, one per job)
+              │
+              ▼
+         Python HTTP server on port 8000
+         running crawl4ai + SEOAnalyzer
 ```
+
+**Key design:** Each crawl job gets its own Container instance (Durable Object keyed by job_id). The Worker is the only thing that talks to D1. The container runs the crawl and exposes results via HTTP; the Worker polls `/status` and ingests results when done.
 
 ## 1. Create Cloudflare Resources
 
 ```bash
-# Install wrangler
+# Install wrangler v4+
 npm install -g wrangler
 
 # Login
@@ -21,70 +30,37 @@ wrangler login
 
 # Create D1 database
 wrangler d1 create seo-audit-db
-# Copy the database_id into infrastructure/worker/wrangler.toml
+# → Copy the database_id into infrastructure/worker/wrangler.toml
 
 # Create R2 bucket
 wrangler r2 bucket create seo-audit-snapshots
 
-# Initialize the schema
+# Initialize the D1 schema
 cd infrastructure/worker
+npm install
 npm run db:init
 
-# Set secrets
-wrangler secret put API_KEY          # your chosen bearer token
-wrangler secret put DOCKER_API_URL   # URL that triggers Docker containers
+# Set API key secret
+wrangler secret put API_KEY
 ```
 
-## 2. Deploy the Worker
+## 2. Deploy (Worker + Container)
 
 ```bash
 cd infrastructure/worker
-npm install
 npm run deploy
 ```
 
-Your gateway will be live at `https://seo-audit-gateway.<your-subdomain>.workers.dev`.
+This single command:
+1. Builds the Docker image from `infrastructure/docker/` (requires Docker running locally)
+2. Pushes it to Cloudflare's container registry
+3. Deploys the Worker with the Container binding
 
-## 3. Build the Docker Image
+First deploy takes a few minutes (image build + push). Subsequent deploys are faster due to layer caching.
 
-```bash
-# From repo root
-docker build -f infrastructure/docker/Dockerfile -t seo-audit-crawler .
-```
+**Important:** After the first deploy, wait a few minutes for container provisioning before sending requests.
 
-Run it (locally or via your container orchestrator):
-
-```bash
-docker run --rm \
-  -e JOB_ID="test-job-id" \
-  -e START_URL="https://example.com" \
-  -e CALLBACK_URL="https://seo-audit-gateway.you.workers.dev/jobs/test-job-id/results" \
-  -e API_KEY="your-api-key" \
-  -e MAX_PAGES=50 \
-  -e MAX_DEPTH=3 \
-  seo-audit-crawler
-```
-
-## 4. Docker Orchestration
-
-The Worker needs a `DOCKER_API_URL` — something that accepts a POST and spins up a container. Options:
-
-- **Cloudflare Workers + Containers** (if available in your plan)
-- **Railway / Fly.io / Render** — deploy the Docker image as an on-demand service
-- **Self-hosted** — a small HTTP server that does `docker run` on request
-- **AWS ECS / GCP Cloud Run** — serverless container execution
-
-The Worker POSTs this payload to `DOCKER_API_URL`:
-```json
-{
-  "job_id": "uuid",
-  "url": "https://example.com",
-  "config": { "max_pages": 50, "max_depth": 3 },
-  "callback_url": "https://gateway/jobs/{id}/results"
-}
-```
-
-## 5. Set Up the MCP Tool for Claude
+## 3. Set Up the MCP Tool for Claude
 
 Add to your Claude Code MCP config (`~/.claude/mcp.json` or project `.mcp.json`):
 
@@ -109,29 +85,32 @@ cd infrastructure/mcp-db-tool
 npm install
 ```
 
-## 6. Usage Flow (as Claude)
+## 4. Usage Flow
 
-Once configured, Claude has 5 tools:
+Once configured, Claude has 6 tools:
 
-```
-submit_crawl    → Start a crawl: "Audit https://example.com"
-list_jobs       → Check status:  "List running jobs"
-get_job         → Get summary:   "Show results for job abc123"
-get_issues      → See problems:  "What are the critical issues?"
-query_db        → Custom SQL:    "Find all pages missing H1 tags"
-```
+| Tool | Purpose |
+|------|---------|
+| `submit_crawl` | Start a crawl — spins up a CF Container |
+| `poll_job` | Poll live progress from the running container |
+| `list_jobs` | List jobs by domain/status |
+| `get_job` | Get job summary + SEO score |
+| `get_issues` | Get all SEO issues (filterable by severity) |
+| `query_db` | Run custom SQL against D1 |
 
-### Example workflow:
+### Example conversation:
 
-1. **You:** "Run an SEO audit on example.com"
-2. **Claude:** uses `submit_crawl` → gets job_id
-3. **Claude:** uses `get_job` to poll until status = completed
-4. **Claude:** uses `get_issues` with severity=critical → reports findings
-5. **Claude:** uses `query_db` for deeper analysis:
+> **You:** "Run an SEO audit on example.com"
+
+1. Claude uses `submit_crawl(url="https://example.com")` → gets job_id
+2. Claude uses `poll_job(job_id)` → sees "running, 12/50 pages"
+3. Claude uses `poll_job(job_id)` → sees "completed, score 73/100"
+4. Claude uses `get_issues(job_id, severity="critical")` → reports findings
+5. Claude uses `query_db` for deeper analysis:
    ```sql
    SELECT url, title, h1_count, word_count
    FROM page_audits
-   WHERE job_id = 'xxx' AND word_count < 300
+   WHERE job_id = 'xxx' AND title_status = 'fail'
    ORDER BY word_count
    ```
 
@@ -139,15 +118,32 @@ query_db        → Custom SQL:    "Find all pages missing H1 tags"
 
 | Table | Purpose |
 |-------|---------|
-| `crawl_jobs` | Job lifecycle tracking |
-| `page_audits` | Per-page SEO results (key fields + full JSON) |
-| `site_issues` | Flat issue list (type, severity, affected URLs) |
+| `crawl_jobs` | Job lifecycle (status, domain, score, timestamps) |
+| `page_audits` | Per-page SEO metrics + full JSON audit result |
+| `site_issues` | Flat issue list (type, severity, affected URLs, fix) |
 | `site_summaries` | Site-wide score and aggregate stats |
 
 | View | Purpose |
 |------|---------|
-| `v_latest_audits` | Most recent audit per domain |
-| `v_critical_issues` | All critical issues across domains |
+| `v_latest_audits` | Most recent completed audit per domain |
+| `v_critical_issues` | All critical issues across all domains |
 | `v_problem_pages` | Pages with any SEO failure |
 
 Full schema: `infrastructure/d1-schema.sql`
+
+## Container Details
+
+- **Image:** Built from `infrastructure/docker/Dockerfile`
+- **Runtime:** Python 3.11 + Chromium (via Playwright)
+- **Port:** 8000 (HTTP server)
+- **Instance type:** `standard-1` (needs CPU + memory for headless browser)
+- **Sleep timeout:** 30 minutes idle → container sleeps (saves cost)
+- **Max instances:** 10 concurrent crawl jobs
+
+### Container endpoints (internal, called by Worker):
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/start` | POST | Begin a crawl (returns 202, runs in background) |
+| `/status` | GET | Progress + results when done |
+| `/health` | GET | Liveness check |

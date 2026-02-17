@@ -1,12 +1,13 @@
 /**
  * SEO Audit MCP Tool — Database query interface for Claude.
  *
- * Connects to the Cloudflare Worker gateway and exposes 5 tools:
- *   1. submit_crawl    — Start a new SEO audit crawl
- *   2. list_jobs       — List crawl jobs (filter by domain/status)
- *   3. get_job         — Get job details + audit summary
- *   4. get_issues      — Get SEO issues for a job
- *   5. query_db        — Run arbitrary read-only SQL against D1
+ * Connects to the Cloudflare Worker gateway and exposes 6 tools:
+ *   1. submit_crawl    — Start a new SEO audit crawl (spins up CF Container)
+ *   2. poll_job        — Poll live crawl progress from the container
+ *   3. list_jobs       — List crawl jobs (filter by domain/status)
+ *   4. get_job         — Get job details + audit summary
+ *   5. get_issues      — Get SEO issues for a job
+ *   6. query_db        — Run arbitrary read-only SQL against D1
  *
  * Configuration (env vars):
  *   GATEWAY_URL  — Base URL of the CF Worker (e.g. https://seo-audit-gateway.you.workers.dev)
@@ -47,6 +48,21 @@ const TOOLS = [
         },
       },
       required: ["url"],
+    },
+  },
+  {
+    name: "poll_job",
+    description:
+      "Poll the live status of a running crawl job. If the crawl is still running, returns pages_done/pages_found progress. If completed, the Worker automatically ingests results into D1. Use this after submit_crawl to wait for completion.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        job_id: {
+          type: "string",
+          description: "The job UUID from submit_crawl",
+        },
+      },
+      required: ["job_id"],
     },
   },
   {
@@ -157,7 +173,22 @@ async function handleTool(name, args) {
         max_pages: args.max_pages,
         max_depth: args.max_depth,
       });
-      return `Crawl job submitted.\n\nJob ID: ${result.job_id}\nDomain: ${result.domain}\nStatus: ${result.status}\n\nUse get_job with this job_id to check progress. Once completed, use get_issues to see findings.`;
+      return `Crawl job submitted. A Cloudflare Container is spinning up.\n\nJob ID: ${result.job_id}\nDomain: ${result.domain}\nStatus: ${result.status}\n\nUse poll_job to check progress. Once completed, use get_issues to see findings.`;
+    }
+
+    case "poll_job": {
+      const result = await gateway("GET", `/jobs/${args.job_id}/status`);
+      let out = `Job: ${result.id}\nStatus: ${result.status}`;
+      if (result.pages_done !== undefined) out += `\nPages crawled: ${result.pages_done}`;
+      if (result.pages_found !== undefined) out += `\nPages found: ${result.pages_found}`;
+      if (result.score !== undefined && result.score !== null) out += `\nSEO Score: ${result.score}/100`;
+      if (result.error) out += `\nError: ${result.error}`;
+      if (result.status === "completed") {
+        out += `\n\nCrawl complete! Results are in D1. Use get_job for summary, get_issues for problems, or query_db for custom analysis.`;
+      } else if (result.status === "running") {
+        out += `\n\nStill running. Poll again in a few seconds.`;
+      }
+      return out;
     }
 
     case "list_jobs": {
