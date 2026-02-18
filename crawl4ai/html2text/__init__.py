@@ -677,6 +677,11 @@ class HTML2Text(html.parser.HTMLParser):
                     self.o(str(li.num) + ". ")
                 self.start = True
 
+        if tag == "caption":
+            if not start:
+                # Ensure caption text ends on its own line before table rows
+                self.soft_br()
+
         if tag in ["table", "tr", "td", "th"]:
             if self.ignore_tables:
                 if tag == "tr":
@@ -708,6 +713,9 @@ class HTML2Text(html.parser.HTMLParser):
                         if self.pad_tables:
                             self.o("<" + config.TABLE_MARKER_FOR_PAD + ">")
                             self.o("  \n")
+                        else:
+                            # Ensure table starts on its own line (GFM requirement)
+                            self.soft_br()
                     else:
                         if self.pad_tables:
                             # add break in case the table is empty or its 1 row table
@@ -715,18 +723,34 @@ class HTML2Text(html.parser.HTMLParser):
                             self.o("</" + config.TABLE_MARKER_FOR_PAD + ">")
                             self.o("  \n")
                 if tag in ["td", "th"] and start:
-                    if self.split_next_td:
-                        self.o("| ")
+                    if self.pad_tables:
+                        # pad_tables mode: keep upstream inter-cell delimiter only
+                        # (pad post-processor adds leading/trailing pipes and alignment)
+                        if self.split_next_td:
+                            self.o("| ")
+                    else:
+                        # GFM mode: leading pipe on first cell, spaced pipes between cells
+                        if self.split_next_td:
+                            self.o(" | ")
+                        else:
+                            self.o("| ")
                     self.split_next_td = True
 
                 if tag == "tr" and start:
                     self.td_count = 0
                 if tag == "tr" and not start:
+                    if not self.pad_tables:
+                        # Add trailing pipe for GFM compliance
+                        self.o(" |")
                     self.split_next_td = False
                     self.soft_br()
                 if tag == "tr" and not start and self.table_start:
-                    # Underline table header
-                    self.o("|".join(["---"] * self.td_count))
+                    if self.pad_tables:
+                        # pad_tables: plain separator (post-processor reformats)
+                        self.o("|".join(["---"] * self.td_count))
+                    else:
+                        # GFM: separator with leading/trailing pipes
+                        self.o("| " + " | ".join(["---"] * self.td_count) + " |")
                     self.soft_br()
                     self.table_start = False
                 if tag in ["td", "th"] and start:
