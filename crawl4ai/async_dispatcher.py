@@ -458,7 +458,8 @@ class MemoryAdaptiveDispatcher(BaseDispatcher):
 
         except Exception as e:
             if self.monitor:
-                self.monitor.update_memory_status(f"QUEUE_ERROR: {str(e)}")                
+                self.monitor.update_memory_status(f"QUEUE_ERROR: {str(e)}")
+            raise       
         
         finally:
             # Clean up
