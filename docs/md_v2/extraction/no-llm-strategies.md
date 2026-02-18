@@ -761,6 +761,38 @@ schema = JsonCssExtractionStrategy.generate_schema(
 
 The generator also understands sibling layouts — for sites like Hacker News where data is split across sibling elements, it will automatically use the [`source` field](#sibling-data) to reach sibling data.
 
+### Token Usage Tracking
+
+`generate_schema` may make multiple LLM calls internally (field inference, schema generation, validation retries). To track the total token consumption across all of these calls, pass a `TokenUsage` accumulator:
+
+```python
+from crawl4ai import JsonCssExtractionStrategy
+from crawl4ai.models import TokenUsage
+
+usage = TokenUsage()
+
+schema = JsonCssExtractionStrategy.generate_schema(
+    url="https://news.ycombinator.com",
+    query="Extract each story: title, url, score, author",
+    usage=usage,
+)
+
+print(f"Prompt tokens:     {usage.prompt_tokens}")
+print(f"Completion tokens: {usage.completion_tokens}")
+print(f"Total tokens:      {usage.total_tokens}")
+```
+
+The `usage` parameter is optional — omitting it changes nothing (fully backward-compatible). You can also reuse the same accumulator across multiple calls to get a grand total:
+
+```python
+usage = TokenUsage()
+schema1 = JsonCssExtractionStrategy.generate_schema(url=url1, query=q1, usage=usage)
+schema2 = JsonCssExtractionStrategy.generate_schema(url=url2, query=q2, usage=usage)
+print(f"Grand total: {usage.total_tokens} tokens")
+```
+
+Both `generate_schema` (sync) and `agenerate_schema` (async) support the `usage` parameter.
+
 ### LLM Provider Options
 
 1. **OpenAI GPT-4 (`openai/gpt4o`)**

@@ -1599,8 +1599,12 @@ class JsonElementExtractionStrategy(ExtractionStrategy):
         return "\n".join(parts)
 
     @staticmethod
-    async def _infer_target_json(query: str, html_snippet: str, llm_config, url: str = None) -> Optional[dict]:
+    async def _infer_target_json(query: str, html_snippet: str, llm_config, url: str = None, usage: 'TokenUsage' = None) -> Optional[dict]:
         """Infer a target JSON example from a query and HTML snippet via a quick LLM call.
+
+        Args:
+            usage: Optional TokenUsage accumulator. If provided, token counts from
+                   this LLM call are added to it in-place.
 
         Returns the parsed dict, or None if inference fails.
         """
@@ -1633,6 +1637,10 @@ class JsonElementExtractionStrategy(ExtractionStrategy):
                 api_token=llm_config.api_token,
                 base_url=llm_config.base_url,
             )
+            if usage is not None:
+                usage.completion_tokens += response.usage.completion_tokens
+                usage.prompt_tokens += response.usage.prompt_tokens
+                usage.total_tokens += response.usage.total_tokens
             raw = response.choices[0].message.content
             if not raw or not raw.strip():
                 return None
@@ -1726,6 +1734,7 @@ In this scenario, use your best judgment to generate the schema. You need to exa
         url: Union[str, List[str]] = None,
         validate: bool = True,
         max_refinements: int = 3,
+        usage: 'TokenUsage' = None,
         **kwargs
     ) -> dict:
         """
@@ -1744,6 +1753,9 @@ In this scenario, use your best judgment to generate the schema. You need to exa
             validate (bool): If True, validate the schema against the HTML and
                 refine via LLM feedback loop. Defaults to False (zero overhead).
             max_refinements (int): Max refinement rounds when validate=True. Defaults to 3.
+            usage (TokenUsage, optional): Token usage accumulator. If provided,
+                token counts from all LLM calls (including inference and
+                validation retries) are added to it in-place.
             **kwargs: Additional args passed to LLM processor.
 
         Returns:
@@ -1770,6 +1782,7 @@ In this scenario, use your best judgment to generate the schema. You need to exa
             url=url,
             validate=validate,
             max_refinements=max_refinements,
+            usage=usage,
             **kwargs
         )
 
@@ -1793,6 +1806,7 @@ In this scenario, use your best judgment to generate the schema. You need to exa
         url: Union[str, List[str]] = None,
         validate: bool = True,
         max_refinements: int = 3,
+        usage: 'TokenUsage' = None,
         **kwargs
     ) -> dict:
         """
@@ -1815,6 +1829,9 @@ In this scenario, use your best judgment to generate the schema. You need to exa
             validate (bool): If True, validate the schema against the HTML and
                 refine via LLM feedback loop. Defaults to False (zero overhead).
             max_refinements (int): Max refinement rounds when validate=True. Defaults to 3.
+            usage (TokenUsage, optional): Token usage accumulator. If provided,
+                token counts from all LLM calls (including inference and
+                validation retries) are added to it in-place.
             **kwargs: Additional args passed to LLM processor.
 
         Returns:
@@ -1913,7 +1930,7 @@ In this scenario, use your best judgment to generate the schema. You need to exa
                 if url is not None:
                     first_url = url if isinstance(url, str) else url[0]
                 inferred = await JsonElementExtractionStrategy._infer_target_json(
-                    query=query, html_snippet=html, llm_config=llm_config, url=first_url
+                    query=query, html_snippet=html, llm_config=llm_config, url=first_url, usage=usage
                 )
                 if inferred:
                     expected_fields = JsonElementExtractionStrategy._extract_expected_fields(inferred)
@@ -1939,6 +1956,10 @@ In this scenario, use your best judgment to generate the schema. You need to exa
                     messages=messages,
                     extra_args=kwargs,
                 )
+                if usage is not None:
+                    usage.completion_tokens += response.usage.completion_tokens
+                    usage.prompt_tokens += response.usage.prompt_tokens
+                    usage.total_tokens += response.usage.total_tokens
                 raw = response.choices[0].message.content
                 if not raw or not raw.strip():
                     raise ValueError("LLM returned an empty response")

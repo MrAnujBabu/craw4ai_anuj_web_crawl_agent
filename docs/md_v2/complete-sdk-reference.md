@@ -4537,6 +4537,20 @@ xpath_schema = JsonXPathExtractionStrategy.generate_schema(
 # Use the generated schema for fast, repeated extractions
 strategy = JsonCssExtractionStrategy(css_schema)
 ```
+### Token Usage Tracking
+`generate_schema` may make multiple LLM calls internally (field inference, generation, validation retries). Track total token consumption by passing a `TokenUsage` accumulator:
+```python
+from crawl4ai.models import TokenUsage
+
+usage = TokenUsage()
+schema = JsonCssExtractionStrategy.generate_schema(
+    url="https://example.com/products",
+    query="extract product name and price",
+    usage=usage,
+)
+print(f"Total tokens: {usage.total_tokens}")
+```
+The `usage` parameter is optional and fully backward-compatible. Both `generate_schema` (sync) and `agenerate_schema` (async) support it.
 ### LLM Provider Options
 1. **OpenAI GPT-4 (`openai/gpt4o`)**
    - Default provider
