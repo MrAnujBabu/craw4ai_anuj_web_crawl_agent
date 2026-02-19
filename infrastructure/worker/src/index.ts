@@ -515,8 +515,9 @@ async function getPages(
 		         h1_count, has_canonical, is_indexable, word_count, images_no_alt, mixed_content, created_at
 		         FROM page_audits
 		         WHERE job_id = ?
-		           AND (title_status = 'fail' OR meta_desc_status = 'fail'
-		                OR h1_count = 0 OR has_viewport = 0 OR mixed_content = 1)
+		           AND (title_status IN ('fail','warning') OR meta_desc_status IN ('fail','warning')
+		                OR h1_count = 0 OR has_viewport = 0 OR mixed_content = 1
+		                OR images_no_alt > 0 OR word_count < 300)
 		         ORDER BY url LIMIT ? OFFSET ?`;
 	} else {
 		query = `SELECT id, url, domain, status_code, title, title_status, meta_desc_status,

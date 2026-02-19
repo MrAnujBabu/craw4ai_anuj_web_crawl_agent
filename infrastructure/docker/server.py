@@ -59,6 +59,16 @@ def run_crawl_in_thread(job_id: str, url: str, max_pages: int, max_depth: int):
         loop.close()
 
 
+async def _on_crawl_progress(crawl_state: dict):
+    """Called by BFS strategy after each page is crawled."""
+    pages_crawled = crawl_state.get("pages_crawled", 0)
+    urls_count = len(crawl_state.get("visited", set()))
+    with state_lock:
+        state["pages_done"] = pages_crawled
+        state["pages_found"] = max(urls_count, pages_crawled)
+    logger.info(f"Progress: {pages_crawled} pages crawled, {urls_count} URLs discovered")
+
+
 async def _crawl(job_id: str, url: str, max_pages: int, max_depth: int):
     logger.info(f"Starting crawl: job={job_id} url={url} max_pages={max_pages}")
 
@@ -69,6 +79,7 @@ async def _crawl(job_id: str, url: str, max_pages: int, max_depth: int):
         deep_crawl_strategy=BFSDeepCrawlStrategy(
             max_depth=max_depth,
             max_pages=max_pages,
+            on_state_change=_on_crawl_progress,
         ),
     )
 

@@ -134,6 +134,9 @@ def run_site_checks(
 def _check_duplicate_titles(pages: Dict[str, PageAuditResult]) -> Optional[SiteIssue]:
     title_map: Dict[str, List[str]] = defaultdict(list)
     for url, result in pages.items():
+        # Skip redirect pages (301/302/etc.) — they share the destination's title
+        if result.status_code and 300 <= result.status_code < 400:
+            continue
         if result.title.value:
             title_map[result.title.value.lower()].append(url)
 
@@ -157,6 +160,9 @@ def _check_duplicate_titles(pages: Dict[str, PageAuditResult]) -> Optional[SiteI
 def _check_duplicate_descriptions(pages: Dict[str, PageAuditResult]) -> Optional[SiteIssue]:
     desc_map: Dict[str, List[str]] = defaultdict(list)
     for url, result in pages.items():
+        # Skip redirect pages (301/302/etc.) — they share the destination's description
+        if result.status_code and 300 <= result.status_code < 400:
+            continue
         if result.meta_description.value:
             desc_map[result.meta_description.value.lower()].append(url)
 
@@ -243,15 +249,17 @@ def _check_missing_open_graph(pages: Dict[str, PageAuditResult]) -> Optional[Sit
 
 
 def _check_thin_content(pages: Dict[str, PageAuditResult]) -> Optional[SiteIssue]:
-    affected = [url for url, r in pages.items() if r.content.word_count < 300]
+    # Only flag pages whose per-page content check already reported a warning.
+    # This respects the lower threshold for form/transactional pages.
+    affected = [url for url, r in pages.items() if r.content.status == CheckStatus.WARNING]
     if not affected:
         return None
     return SiteIssue(
         issue_type="thin_content",
         severity=IssueSeverity.WARNING,
         affected_pages=affected,
-        description=f"{len(affected)} page(s) with thin content (<300 words)",
-        fix="Expand content with relevant, valuable information",
+        description=f"{len(affected)} page(s) with thin content",
+        fix="Expand content with relevant, valuable information (form/transactional pages have a lower threshold)",
     )
 
 

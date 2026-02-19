@@ -52,20 +52,20 @@ def _parse_html(raw_html: str) -> Optional[HtmlElement]:
 
 
 def check_title(tree: HtmlElement) -> TitleCheck:
-    """Check title tag presence and length (target: 50-60 chars)."""
+    """Check title tag presence and length (target: 30-65 chars)."""
     titles = tree.xpath("//title/text()")
     value = titles[0].strip() if titles else None
     if not value:
         return TitleCheck(status=CheckStatus.FAIL, note="Missing title tag")
 
     length = len(value)
-    if 50 <= length <= 60:
+    if 30 <= length <= 65:
         status, note = CheckStatus.PASS, "Good length"
-    elif 40 <= length < 50:
-        status, note = CheckStatus.WARNING, "Slightly short"
-    elif 60 < length <= 70:
-        status, note = CheckStatus.WARNING, "Slightly long"
-    elif length < 40:
+    elif 20 <= length < 30:
+        status, note = CheckStatus.WARNING, f"Slightly short ({length} chars)"
+    elif 65 < length <= 80:
+        status, note = CheckStatus.WARNING, f"Slightly long ({length} chars)"
+    elif length < 20:
         status, note = CheckStatus.WARNING, f"Too short ({length} chars)"
     else:
         status, note = CheckStatus.WARNING, f"Too long ({length} chars, may be truncated)"
@@ -74,7 +74,7 @@ def check_title(tree: HtmlElement) -> TitleCheck:
 
 
 def check_meta_description(tree: HtmlElement) -> MetaDescriptionCheck:
-    """Check meta description presence and length (target: 150-160 chars)."""
+    """Check meta description presence and length (target: 120-160 chars)."""
     descs = tree.xpath('//meta[@name="description"]/@content')
     value = descs[0].strip() if descs else None
     if not value:
@@ -83,13 +83,13 @@ def check_meta_description(tree: HtmlElement) -> MetaDescriptionCheck:
         )
 
     length = len(value)
-    if 150 <= length <= 160:
+    if 120 <= length <= 160:
         status, note = CheckStatus.PASS, "Good length"
-    elif 120 <= length < 150:
-        status, note = CheckStatus.WARNING, "Slightly short"
+    elif 70 <= length < 120:
+        status, note = CheckStatus.WARNING, f"Slightly short ({length} chars)"
     elif 160 < length <= 200:
-        status, note = CheckStatus.WARNING, "Slightly long"
-    elif length < 120:
+        status, note = CheckStatus.WARNING, f"Slightly long ({length} chars)"
+    elif length < 70:
         status, note = CheckStatus.WARNING, f"Too short ({length} chars)"
     else:
         status, note = CheckStatus.WARNING, f"Too long ({length} chars, will be truncated)"
@@ -544,7 +544,11 @@ def check_hreflang(tree: HtmlElement) -> HreflangCheck:
 
 
 def check_content(tree: HtmlElement) -> ContentCheck:
-    """Check page content word count (flag thin content <300 words)."""
+    """Check page content word count (flag thin content <300 words).
+
+    Pages with forms (login, checkout, contact, etc.) use a lower threshold
+    of 100 words since they are inherently transactional.
+    """
     body = tree.xpath("//body")
     if not body:
         return ContentCheck(status=CheckStatus.WARNING, note="No body content found")
@@ -562,8 +566,15 @@ def check_content(tree: HtmlElement) -> ContentCheck:
     text = " ".join(text_parts)
     words = len(text.split())
 
-    if words < 300:
-        status, note = CheckStatus.WARNING, f"Thin content ({words} words, <300)"
+    # Lower threshold for form/transactional pages
+    has_form = bool(tree.xpath("//form"))
+    thin_threshold = 100 if has_form else 300
+
+    if words < thin_threshold:
+        label = f"Thin content ({words} words, <{thin_threshold})"
+        if has_form:
+            label += " — form page"
+        status, note = CheckStatus.WARNING, label
     elif words < 600:
         status, note = CheckStatus.INFO, f"{words} words (consider expanding)"
     else:

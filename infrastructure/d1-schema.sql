@@ -138,6 +138,8 @@ WHERE si.severity = 'critical'
 ORDER BY si.created_at DESC;
 
 -- Pages with SEO problems (quick filter)
+-- NOTE: Crawler produces 'pass', 'warning', 'fail' statuses. Most issues surface
+-- as 'warning' (length slightly off) with 'fail' reserved for missing tags entirely.
 CREATE VIEW IF NOT EXISTS v_problem_pages AS
 SELECT
     pa.url,
@@ -152,8 +154,10 @@ SELECT
     pa.job_id,
     pa.created_at
 FROM page_audits pa
-WHERE pa.title_status = 'fail'
-   OR pa.meta_desc_status = 'fail'
+WHERE pa.title_status IN ('fail', 'warning')
+   OR pa.meta_desc_status IN ('fail', 'warning')
    OR pa.h1_count = 0
    OR pa.has_viewport = 0
-   OR pa.mixed_content = 1;
+   OR pa.mixed_content = 1
+   OR pa.images_no_alt > 0
+   OR pa.word_count < 300;
