@@ -1135,34 +1135,33 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
             raise e
 
         finally:
-            # If no session_id is given we should close the page
-            all_contexts = page.context.browser.contexts
-            total_pages = sum(len(context.pages) for context in all_contexts)
-            if config.session_id:
-                # Session keeps exclusive access to the page - don't release
-                pass
-            elif total_pages <= 1 and (self.browser_config.use_managed_browser or self.browser_config.headless):
-                # Keep the page open but release it for reuse by next crawl
-                await self.browser_manager.release_page_with_context(page)
-            else:
-                # Detach listeners before closing to prevent potential errors during close
-                if config.capture_network_requests:
-                    page.remove_listener("request", handle_request_capture)
-                    page.remove_listener("response", handle_response_capture)
-                    page.remove_listener("requestfailed", handle_request_failed_capture)
-                if config.capture_console_messages:
-                    # Retrieve any final console messages for undetected browsers
-                    if hasattr(self.adapter, 'retrieve_console_messages'):
-                        final_messages = await self.adapter.retrieve_console_messages(page)
-                        captured_console.extend(final_messages)
+            if not config.session_id:
+                # ALWAYS decrement refcount first — must succeed even if
+                # the browser crashed or the page is in a bad state.
+                try:
+                    await self.browser_manager.release_page_with_context(page)
+                except Exception:
+                    pass
 
-                    # Clean up console capture
-                    await self.adapter.cleanup_console_capture(page, handle_console, handle_error)
+                # Best-effort cleanup: detach listeners and close the page
+                try:
+                    if config.capture_network_requests:
+                        page.remove_listener("request", handle_request_capture)
+                        page.remove_listener("response", handle_response_capture)
+                        page.remove_listener("requestfailed", handle_request_failed_capture)
+                    if config.capture_console_messages:
+                        if hasattr(self.adapter, 'retrieve_console_messages'):
+                            final_messages = await self.adapter.retrieve_console_messages(page)
+                            captured_console.extend(final_messages)
+                        await self.adapter.cleanup_console_capture(page, handle_console, handle_error)
 
-                # Release page and decrement context refcount before closing
-                await self.browser_manager.release_page_with_context(page)
-                # Close the page
-                await page.close()
+                    # Close the page unless it's the last one in a headless/managed browser
+                    all_contexts = page.context.browser.contexts
+                    total_pages = sum(len(context.pages) for context in all_contexts)
+                    if not (total_pages <= 1 and (self.browser_config.use_managed_browser or self.browser_config.headless)):
+                        await page.close()
+                except Exception:
+                    pass
 
     # async def _handle_full_page_scan(self, page: Page, scroll_delay: float = 0.1):
     async def _handle_full_page_scan(self, page: Page, scroll_delay: float = 0.1, max_scroll_steps: Optional[int] = None):
