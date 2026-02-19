@@ -299,3 +299,9 @@ scripts/
 *.rdb
 *.ldb
 MEMORY.md
+
+# Node
+node_modules/
+
+# Infrastructure build artifacts
+infrastructure/docker/crawl4ai/
