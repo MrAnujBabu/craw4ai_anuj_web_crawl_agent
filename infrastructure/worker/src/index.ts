@@ -23,6 +23,12 @@ import { z } from "zod";
 import { Container } from "@cloudflare/containers";
 
 // ═══════════════════════════════════════════════════════════════════════
+// Constants
+// ═══════════════════════════════════════════════════════════════════════
+
+const JOB_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes — mark stuck jobs as failed
+
+// ═══════════════════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -217,6 +223,37 @@ export class SEOAuditMcpAgent extends McpAgent {
 			}
 		);
 
+		// ── cancel_job ──────────────────────────────────────────
+		this.server.tool(
+			"cancel_job",
+			"Cancel a running or queued crawl job. Marks it as failed with 'Cancelled by user'.",
+			{
+				job_id: z.string().describe("The job UUID to cancel"),
+			},
+			async (args) => {
+				const result = await cancelJob(workerEnv, args.job_id);
+				return { content: [{ type: "text" as const, text: `${result.message} (status: ${result.status})` }] };
+			}
+		);
+
+		// ── cleanup_jobs ────────────────────────────────────────
+		this.server.tool(
+			"cleanup_jobs",
+			"Expire all stuck jobs that have been running for over 5 minutes with no results. Returns how many were cleaned up.",
+			{},
+			async () => {
+				const expired = await expireStaleJobs(workerEnv);
+				return {
+					content: [{
+						type: "text" as const,
+						text: expired > 0
+							? `Cleaned up ${expired} stuck job(s). They have been marked as failed.`
+							: "No stuck jobs found. All jobs are either completed, failed, or still within the timeout window.",
+					}],
+				};
+			}
+		);
+
 		// ── query_db ─────────────────────────────────────────────
 		this.server.tool(
 			"query_db",
@@ -270,27 +307,35 @@ async function submitCrawl(
 	const container = env.CRAWLER.get(containerId);
 
 	try {
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 30_000); // 30s to start container
+
 		const containerResp = await container.fetch(
 			new Request("http://container/start", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({ job_id: jobId, url, max_pages: pages, max_depth: depth }),
+				signal: controller.signal,
 			})
 		);
+		clearTimeout(timeout);
 
 		if (!containerResp.ok) {
 			const errText = await containerResp.text();
-			throw new Error(`Container rejected start: ${errText}`);
+			throw new Error(`Container rejected start (HTTP ${containerResp.status}): ${errText}`);
 		}
 
 		await env.DB.prepare(
 			`UPDATE crawl_jobs SET status = 'running', started_at = datetime('now') WHERE id = ?`
 		).bind(jobId).run();
 	} catch (err: any) {
+		const message = err.name === "AbortError"
+			? "Container start timed out after 30s"
+			: `Container start failed: ${err.message}`;
 		await env.DB.prepare(
-			`UPDATE crawl_jobs SET status = 'failed', error = ? WHERE id = ?`
-		).bind(`Container start failed: ${err.message}`, jobId).run();
-		throw new Error(`Failed to start crawler container: ${err.message}`);
+			`UPDATE crawl_jobs SET status = 'failed', error = ?, completed_at = datetime('now') WHERE id = ?`
+		).bind(message, jobId).run();
+		throw new Error(message);
 	}
 
 	return { job_id: jobId, status: "running", domain };
@@ -298,7 +343,7 @@ async function submitCrawl(
 
 async function pollJob(env: Env, jobId: string): Promise<any> {
 	const job = await env.DB.prepare(
-		"SELECT id, status, score, pages_found, pages_done, error FROM crawl_jobs WHERE id = ?"
+		"SELECT id, status, score, pages_found, pages_done, error, started_at FROM crawl_jobs WHERE id = ?"
 	).bind(jobId).first();
 
 	if (!job) throw new Error("Job not found");
@@ -307,6 +352,18 @@ async function pollJob(env: Env, jobId: string): Promise<any> {
 		return job;
 	}
 
+	// Check for stuck jobs — if running for too long with no progress, mark as failed
+	if (job.status === "running" && job.started_at) {
+		const elapsed = Date.now() - new Date(job.started_at + "Z").getTime();
+		if (elapsed > JOB_TIMEOUT_MS) {
+			const reason = `Job timed out after ${Math.round(elapsed / 1000)}s with ${job.pages_done ?? 0} pages done`;
+			await markJobFailed(env, jobId, reason);
+			return { id: jobId, status: "failed", error: reason, pages_done: job.pages_done ?? 0 };
+		}
+	}
+
+	// Try to get live status from the container
+	let containerError: string | undefined;
 	try {
 		const containerId = env.CRAWLER.idFromName(jobId);
 		const container = env.CRAWLER.get(containerId);
@@ -314,6 +371,13 @@ async function pollJob(env: Env, jobId: string): Promise<any> {
 
 		if (resp.ok) {
 			const containerStatus = (await resp.json()) as any;
+
+			// Container reported failure
+			if (containerStatus.status === "failed") {
+				const reason = containerStatus.error || "Container reported failure (no details)";
+				await markJobFailed(env, jobId, reason);
+				return { id: jobId, status: "failed", error: reason };
+			}
 
 			if (containerStatus.status === "completed" && containerStatus.results) {
 				await ingestResults(jobId, containerStatus.results, env);
@@ -325,18 +389,71 @@ async function pollJob(env: Env, jobId: string): Promise<any> {
 				};
 			}
 
+			// Update progress in DB so we can track it even without polling
+			const pagesDone = containerStatus.pages_done ?? 0;
+			const pagesFound = containerStatus.pages_found ?? 0;
+			await env.DB.prepare(
+				"UPDATE crawl_jobs SET pages_done = ?, pages_found = ? WHERE id = ? AND status = 'running'"
+			).bind(pagesDone, pagesFound, jobId).run();
+
 			return {
 				id: jobId,
 				status: "running",
-				pages_done: containerStatus.pages_done ?? 0,
-				pages_found: containerStatus.pages_found ?? 0,
+				pages_done: pagesDone,
+				pages_found: pagesFound,
 			};
+		} else {
+			containerError = `Container returned HTTP ${resp.status}`;
 		}
-	} catch {
-		// Container might not be ready yet
+	} catch (err: any) {
+		containerError = err.message || "Container unreachable";
+	}
+
+	// If we couldn't reach the container and the job is old enough, that's a failure
+	if (containerError && job.started_at) {
+		const elapsed = Date.now() - new Date(job.started_at + "Z").getTime();
+		if (elapsed > JOB_TIMEOUT_MS) {
+			const reason = `Container unreachable after ${Math.round(elapsed / 1000)}s: ${containerError}`;
+			await markJobFailed(env, jobId, reason);
+			return { id: jobId, status: "failed", error: reason };
+		}
 	}
 
 	return job;
+}
+
+async function markJobFailed(env: Env, jobId: string, error: string): Promise<void> {
+	await env.DB.prepare(
+		`UPDATE crawl_jobs SET status = 'failed', error = ?, completed_at = datetime('now')
+		 WHERE id = ? AND status IN ('queued', 'running')`
+	).bind(error, jobId).run();
+	console.error(`[markJobFailed] job=${jobId} error=${error}`);
+}
+
+async function expireStaleJobs(env: Env): Promise<number> {
+	const result = await env.DB.prepare(
+		`UPDATE crawl_jobs
+		 SET status = 'failed',
+		     error = 'Timed out: no progress for over 5 minutes',
+		     completed_at = datetime('now')
+		 WHERE status IN ('queued', 'running')
+		   AND started_at IS NOT NULL
+		   AND strftime('%s','now') - strftime('%s', started_at) > ?`
+	).bind(JOB_TIMEOUT_MS / 1000).run();
+	const expired = result.meta?.changes ?? 0;
+	if (expired > 0) console.log(`[expireStaleJobs] Expired ${expired} stuck job(s)`);
+	return expired;
+}
+
+async function cancelJob(env: Env, jobId: string): Promise<{ id: string; status: string; message: string }> {
+	const job = await env.DB.prepare("SELECT id, status FROM crawl_jobs WHERE id = ?").bind(jobId).first();
+	if (!job) throw new Error("Job not found");
+	if (job.status === "completed" || job.status === "failed") {
+		return { id: jobId, status: job.status as string, message: `Job already ${job.status}` };
+	}
+
+	await markJobFailed(env, jobId, "Cancelled by user");
+	return { id: jobId, status: "failed", message: "Job cancelled" };
 }
 
 async function listJobs(
@@ -345,8 +462,11 @@ async function listJobs(
 	status?: string,
 	limit?: number
 ): Promise<any[]> {
+	// Opportunistically clean up stuck jobs whenever someone lists jobs
+	await expireStaleJobs(env).catch(() => {});
+
 	const maxLimit = Math.min(limit || 20, 100);
-	let query = "SELECT id, domain, start_url, status, score, pages_found, pages_done, created_at, completed_at FROM crawl_jobs WHERE 1=1";
+	let query = "SELECT id, domain, start_url, status, score, pages_found, pages_done, error, created_at, completed_at FROM crawl_jobs WHERE 1=1";
 	const params: string[] = [];
 
 	if (domain) { query += " AND domain = ?"; params.push(domain); }
@@ -600,6 +720,17 @@ export default {
 			if (method === "GET" && statusMatch) {
 				const result = await pollJob(env, statusMatch[1]);
 				return json(result);
+			}
+
+			const cancelMatch = path.match(/^\/jobs\/([a-f0-9-]+)\/cancel$/);
+			if (method === "POST" && cancelMatch) {
+				const result = await cancelJob(env, cancelMatch[1]);
+				return json(result);
+			}
+
+			if (method === "POST" && path === "/jobs/cleanup") {
+				const expired = await expireStaleJobs(env);
+				return json({ expired, message: `Cleaned up ${expired} stuck job(s)` });
 			}
 
 			if (method === "GET" && path === "/query") {
