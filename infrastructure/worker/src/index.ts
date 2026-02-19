@@ -44,6 +44,7 @@ export interface Env {
 export class CrawlerContainer extends Container {
 	defaultPort = 8000;
 	sleepAfter = "5m";
+	enableInternet = true;
 
 	override onStart(): void {
 		console.log("[CrawlerContainer] Container started");
