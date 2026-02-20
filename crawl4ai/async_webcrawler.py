@@ -573,7 +573,7 @@ class AsyncWebCrawler:
             # Scraping Strategy Execution  #
             ################################
             result: ScrapingResult = scraping_strategy.scrap(
-                url, html, **params)
+                kwargs.get("redirected_url", url), html, **params)
 
             if result is None:
                 raise ValueError(
