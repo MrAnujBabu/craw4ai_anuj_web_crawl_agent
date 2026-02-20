@@ -562,132 +562,131 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
         # Get page for session
         page, context = await self.browser_manager.get_page(crawlerRunConfig=config)
 
-        # Push updated UA + sec-ch-ua to the page so the server sees them
-        if ua_changed:
-            combined_headers = {
-                "User-Agent": self.browser_config.user_agent,
-                "sec-ch-ua": self.browser_config.browser_hint,
-            }
-            combined_headers.update(self.browser_config.headers)
-            await page.set_extra_http_headers(combined_headers)
-
-        # await page.goto(URL)
-
-        # Add default cookie
-        # await context.add_cookies(
-        #     [{"name": "cookiesEnabled", "value": "true", "url": url}]
-        # )
-
-        # Handle navigator overrides
-        if config.override_navigator or config.simulate_user or config.magic:
-            await context.add_init_script(load_js_script("navigator_overrider"))
-
-        # Force-open closed shadow roots when flatten_shadow_dom is enabled
-        if config.flatten_shadow_dom:
-            await context.add_init_script("""
-                const _origAttachShadow = Element.prototype.attachShadow;
-                Element.prototype.attachShadow = function(init) {
-                    return _origAttachShadow.call(this, {...init, mode: 'open'});
-                };
-            """)
-
-        # Call hook after page creation
-        await self.execute_hook("on_page_context_created", page, context=context, config=config)
-
-        # Network Request Capturing
-        if config.capture_network_requests:
-            async def handle_request_capture(request):
-                try:
-                    post_data_str = None
-                    try:
-                        # Be cautious with large post data
-                        post_data = request.post_data_buffer
-                        if post_data:
-                             # Attempt to decode, fallback to base64 or size indication
-                             try:
-                                 post_data_str = post_data.decode('utf-8', errors='replace')
-                             except UnicodeDecodeError:
-                                 post_data_str = f"[Binary data: {len(post_data)} bytes]"
-                    except Exception:
-                        post_data_str = "[Error retrieving post data]"
-
-                    captured_requests.append({
-                        "event_type": "request",
-                        "url": request.url,
-                        "method": request.method,
-                        "headers": dict(request.headers), # Convert Header dict
-                        "post_data": post_data_str,
-                        "resource_type": request.resource_type,
-                        "is_navigation_request": request.is_navigation_request(),
-                        "timestamp": time.time()
-                    })
-                except Exception as e:
-                    if self.logger:
-                        self.logger.warning(f"Error capturing request details for {request.url}: {e}", tag="CAPTURE")
-                    captured_requests.append({"event_type": "request_capture_error", "url": request.url, "error": str(e), "timestamp": time.time()})
-
-            async def handle_response_capture(response):
-                try:
-                    try:
-                        # body = await response.body()
-                        # json_body = await response.json()
-                        text_body = await response.text()
-                    except Exception as e:
-                        body = None
-                        # json_body = None
-                        # text_body = None
-                    captured_requests.append({
-                        "event_type": "response",
-                        "url": response.url,
-                        "status": response.status,
-                        "status_text": response.status_text,
-                        "headers": dict(response.headers), # Convert Header dict
-                        "from_service_worker": response.from_service_worker,
-                        "request_timing": response.request.timing, # Detailed timing info
-                        "timestamp": time.time(),
-                        "body" : {
-                            # "raw": body,
-                            # "json": json_body,
-                            "text": text_body
-                        }
-                    })
-                except Exception as e:
-                    if self.logger:
-                        self.logger.warning(f"Error capturing response details for {response.url}: {e}", tag="CAPTURE")
-                    captured_requests.append({"event_type": "response_capture_error", "url": response.url, "error": str(e), "timestamp": time.time()})
-
-            async def handle_request_failed_capture(request):
-                 try:
-                    captured_requests.append({
-                        "event_type": "request_failed",
-                        "url": request.url,
-                        "method": request.method,
-                        "resource_type": request.resource_type,
-                        "failure_text": str(request.failure) if request.failure else "Unknown failure",
-                        "timestamp": time.time()
-                    })
-                 except Exception as e:
-                    if self.logger:
-                        self.logger.warning(f"Error capturing request failed details for {request.url}: {e}", tag="CAPTURE")
-                    captured_requests.append({"event_type": "request_failed_capture_error", "url": request.url, "error": str(e), "timestamp": time.time()})
-
-            page.on("request", handle_request_capture)
-            page.on("response", handle_response_capture)
-            page.on("requestfailed", handle_request_failed_capture)
-
-        # Console Message Capturing
-        handle_console = None
-        handle_error = None
-        if config.capture_console_messages:
-            # Set up console capture using adapter
-            handle_console = await self.adapter.setup_console_capture(page, captured_console)
-            handle_error = await self.adapter.setup_error_capture(page, captured_console)
-
-        # Set up console logging if requested
-        # Note: For undetected browsers, console logging won't work directly
-        # but captured messages can still be logged after retrieval
-
         try:
+            # Push updated UA + sec-ch-ua to the page so the server sees them
+            if ua_changed:
+                combined_headers = {
+                    "User-Agent": self.browser_config.user_agent,
+                    "sec-ch-ua": self.browser_config.browser_hint,
+                }
+                combined_headers.update(self.browser_config.headers)
+                await page.set_extra_http_headers(combined_headers)
+
+            # await page.goto(URL)
+
+            # Add default cookie
+            # await context.add_cookies(
+            #     [{"name": "cookiesEnabled", "value": "true", "url": url}]
+            # )
+
+            # Handle navigator overrides
+            if config.override_navigator or config.simulate_user or config.magic:
+                await context.add_init_script(load_js_script("navigator_overrider"))
+
+            # Force-open closed shadow roots when flatten_shadow_dom is enabled
+            if config.flatten_shadow_dom:
+                await context.add_init_script("""
+                    const _origAttachShadow = Element.prototype.attachShadow;
+                    Element.prototype.attachShadow = function(init) {
+                        return _origAttachShadow.call(this, {...init, mode: 'open'});
+                    };
+                """)
+
+            # Call hook after page creation
+            await self.execute_hook("on_page_context_created", page, context=context, config=config)
+
+            # Network Request Capturing
+            if config.capture_network_requests:
+                async def handle_request_capture(request):
+                    try:
+                        post_data_str = None
+                        try:
+                            # Be cautious with large post data
+                            post_data = request.post_data_buffer
+                            if post_data:
+                                 # Attempt to decode, fallback to base64 or size indication
+                                 try:
+                                     post_data_str = post_data.decode('utf-8', errors='replace')
+                                 except UnicodeDecodeError:
+                                     post_data_str = f"[Binary data: {len(post_data)} bytes]"
+                        except Exception:
+                            post_data_str = "[Error retrieving post data]"
+
+                        captured_requests.append({
+                            "event_type": "request",
+                            "url": request.url,
+                            "method": request.method,
+                            "headers": dict(request.headers), # Convert Header dict
+                            "post_data": post_data_str,
+                            "resource_type": request.resource_type,
+                            "is_navigation_request": request.is_navigation_request(),
+                            "timestamp": time.time()
+                        })
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.warning(f"Error capturing request details for {request.url}: {e}", tag="CAPTURE")
+                        captured_requests.append({"event_type": "request_capture_error", "url": request.url, "error": str(e), "timestamp": time.time()})
+
+                async def handle_response_capture(response):
+                    try:
+                        try:
+                            # body = await response.body()
+                            # json_body = await response.json()
+                            text_body = await response.text()
+                        except Exception as e:
+                            body = None
+                            # json_body = None
+                            # text_body = None
+                        captured_requests.append({
+                            "event_type": "response",
+                            "url": response.url,
+                            "status": response.status,
+                            "status_text": response.status_text,
+                            "headers": dict(response.headers), # Convert Header dict
+                            "from_service_worker": response.from_service_worker,
+                            "request_timing": response.request.timing, # Detailed timing info
+                            "timestamp": time.time(),
+                            "body" : {
+                                # "raw": body,
+                                # "json": json_body,
+                                "text": text_body
+                            }
+                        })
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.warning(f"Error capturing response details for {response.url}: {e}", tag="CAPTURE")
+                        captured_requests.append({"event_type": "response_capture_error", "url": response.url, "error": str(e), "timestamp": time.time()})
+
+                async def handle_request_failed_capture(request):
+                     try:
+                        captured_requests.append({
+                            "event_type": "request_failed",
+                            "url": request.url,
+                            "method": request.method,
+                            "resource_type": request.resource_type,
+                            "failure_text": str(request.failure) if request.failure else "Unknown failure",
+                            "timestamp": time.time()
+                        })
+                     except Exception as e:
+                        if self.logger:
+                            self.logger.warning(f"Error capturing request failed details for {request.url}: {e}", tag="CAPTURE")
+                        captured_requests.append({"event_type": "request_failed_capture_error", "url": request.url, "error": str(e), "timestamp": time.time()})
+
+                page.on("request", handle_request_capture)
+                page.on("response", handle_response_capture)
+                page.on("requestfailed", handle_request_failed_capture)
+
+            # Console Message Capturing
+            handle_console = None
+            handle_error = None
+            if config.capture_console_messages:
+                # Set up console capture using adapter
+                handle_console = await self.adapter.setup_console_capture(page, captured_console)
+                handle_error = await self.adapter.setup_error_capture(page, captured_console)
+
+            # Set up console logging if requested
+            # Note: For undetected browsers, console logging won't work directly
+            # but captured messages can still be logged after retrieval
             # Get SSL certificate information if requested and URL is HTTPS
             ssl_cert = None
             if config.fetch_ssl_certificate:
