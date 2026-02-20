@@ -1867,7 +1867,7 @@ class AsyncPlaywrightCrawlerStrategy(AsyncCrawlerStrategy):
 
             buffered = BytesIO()
             stitched = stitched.convert("RGB")
-            stitched.save(buffered, format="BMP", quality=85)
+            stitched.save(buffered, format="PNG")
             encoded = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
             return encoded

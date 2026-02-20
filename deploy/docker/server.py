@@ -383,9 +383,10 @@ async def generate_screenshot(
     _td: Dict = Depends(token_dep),
 ):
     """
-    Capture a full-page PNG screenshot of the specified URL, waiting an optional delay before capture,
-    Use when you need an image snapshot of the rendered page. Its recommened to provide an output path to save the screenshot.
-    Then in result instead of the screenshot you will get a path to the saved file.
+    Capture a full-page PNG screenshot of the specified URL, waiting an optional delay before capture.
+    Use when you need an image snapshot of the rendered page.
+    Returns a base64-encoded PNG screenshot. If output_path is provided, the server will also
+    attempt to save the file locally (useful for non-Docker deployments).
     """
     validate_url_scheme(body.url)
     from crawler_pool import get_crawler
@@ -396,13 +397,17 @@ async def generate_screenshot(
         if not results[0].success:
             raise HTTPException(500, detail=results[0].error_message or "Crawl failed")
         screenshot_data = results[0].screenshot
+        saved_path = None
         if body.output_path:
-            abs_path = os.path.abspath(body.output_path)
-            os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-            with open(abs_path, "wb") as f:
-                f.write(base64.b64decode(screenshot_data))
-            return {"success": True, "path": abs_path}
-        return {"success": True, "screenshot": screenshot_data}
+            try:
+                abs_path = os.path.abspath(body.output_path)
+                os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+                with open(abs_path, "wb") as f:
+                    f.write(base64.b64decode(screenshot_data))
+                saved_path = abs_path
+            except Exception:
+                pass  # File save is best-effort; screenshot data is always returned
+        return {"success": True, "screenshot": screenshot_data, **({"path": saved_path} if saved_path else {})}
     except Exception as e:
         raise HTTPException(500, detail=str(e))
 
