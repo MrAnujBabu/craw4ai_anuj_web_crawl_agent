@@ -1,0 +1,14 @@
+# Ignore Python cache
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+
+# Ignore git
+.git
+.gitignore
+
+# Ignore tests and docs from crawl4ai
+crawl4ai/tests
+crawl4ai/docs
+crawl4ai/.git

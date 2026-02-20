@@ -109,6 +109,19 @@ from .utils import (
     hooks_to_string
 )
 
+# SEO Audit Layer
+from .seo_audit import (
+    SEOAnalyzer,
+    audit_page,
+    run_site_checks,
+    PageAuditResult,
+    SiteAuditResult,
+    SiteAuditSummary,
+    SiteIssue,
+    CheckStatus,
+    IssueSeverity,
+)
+
 __all__ = [
     "AsyncLoggerBase",
     "AsyncLogger",
@@ -198,7 +211,17 @@ __all__ = [
     "BrowserAdapter",
     "PlaywrightAdapter", 
     "UndetectedAdapter",
-    "LinkPreviewConfig"
+    "LinkPreviewConfig",
+    # SEO Audit Layer
+    "SEOAnalyzer",
+    "audit_page",
+    "run_site_checks",
+    "PageAuditResult",
+    "SiteAuditResult",
+    "SiteAuditSummary",
+    "SiteIssue",
+    "CheckStatus",
+    "IssueSeverity",
 ]
 
 

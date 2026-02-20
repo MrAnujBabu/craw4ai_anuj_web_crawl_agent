@@ -286,6 +286,7 @@ docs/apps/linkdin/samples/insights/*
 
 scripts/
 !scripts/gen-sbom.sh
+!infrastructure/deploy.sh
 
 
 # Databse files
@@ -298,3 +299,9 @@ scripts/
 *.rdb
 *.ldb
 MEMORY.md
+
+# Node
+node_modules/
+
+# Infrastructure build artifacts
+infrastructure/docker/crawl4ai/
