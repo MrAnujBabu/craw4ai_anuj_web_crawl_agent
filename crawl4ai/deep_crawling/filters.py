@@ -85,7 +85,7 @@ class FilterChain:
 
     def add_filter(self, filter_: URLFilter) -> "FilterChain":
         """Add a filter to the chain"""
-        self.filters.append(filter_)
+        self.filters = self.filters + (filter_,)
         return self  # Enable method chaining
 
     async def apply(self, url: str) -> bool:
