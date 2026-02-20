@@ -4,9 +4,15 @@ Anti-bot detection heuristics for crawl results.
 Examines HTTP status codes and HTML content patterns to determine
 if a crawl was blocked by anti-bot protection.
 
-Detection is layered: high-confidence structural markers trigger alone,
-while generic patterns require corroborating signals (status code + short page)
-to avoid false positives.
+Detection philosophy: false positives are cheap (the fallback mechanism
+rescues them), false negatives are catastrophic (user gets garbage).
+Err on the side of detection.
+
+Detection is layered:
+- HTTP 403/503 with HTML content → always blocked (these are never desired content)
+- Tier 1 patterns (structural markers) trigger on any page size
+- Tier 2 patterns (generic terms) trigger on short pages or any error status
+- Tier 3 structural integrity catches silent blocks and empty shells
 """
 
 import re
@@ -54,6 +60,10 @@ _TIER1_PATTERNS = [
     # Kasada
     (re.compile(r"KPSDK\.scriptStart\s*=\s*KPSDK\.now\(\)", re.IGNORECASE),
      "Kasada challenge"),
+    # Network security block — Reddit and other platforms serve large SPA shells
+    # with this message buried under 100KB+ of CSS/JS
+    (re.compile(r"blocked\s+by\s+network\s+security", re.IGNORECASE),
+     "Network security block"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -198,26 +208,51 @@ def is_blocked(
     if status_code == 429:
         return True, "HTTP 429 Too Many Requests"
 
-    # --- Check first 15KB for tier 1 patterns (high confidence, any page size) ---
+    # --- Check for tier 1 patterns (high confidence, any page size) ---
+    # First check the raw start of the page (fast path for small pages).
+    # Then, for large pages, also check a stripped version (scripts/styles
+    # removed) because modern block pages bury text under 100KB+ of CSS/JS.
     snippet = html[:15000]
     if snippet:
         for pattern, reason in _TIER1_PATTERNS:
             if pattern.search(snippet):
                 return True, reason
 
-    # --- HTTP 403 + short page (no tier 1 match = check tier 2) ---
-    if status_code == 403 and html_len < _BLOCK_PAGE_MAX_SIZE:
-        # Skip JSON/XML API responses — short 403 from APIs are legit auth errors
-        if not _looks_like_data(html):
-            # Short 403 with almost no content is very likely a block
-            if html_len < _EMPTY_CONTENT_THRESHOLD:
-                return True, f"HTTP 403 with near-empty response ({html_len} bytes)"
-            # Check tier 2 patterns on 403 short pages
-            for pattern, reason in _TIER2_PATTERNS:
-                if pattern.search(snippet):
-                    return True, f"{reason} (HTTP 403, {html_len} bytes)"
+    # Large-page deep scan: strip scripts/styles and re-check tier 1
+    if html_len > 15000:
+        _stripped_for_t1 = _SCRIPT_BLOCK_RE.sub('', html[:500000])
+        _stripped_for_t1 = _STYLE_TAG_RE.sub('', _stripped_for_t1)
+        _deep_snippet = _stripped_for_t1[:30000]
+        for pattern, reason in _TIER1_PATTERNS:
+            if pattern.search(_deep_snippet):
+                return True, reason
 
-    # --- Tier 2 patterns on any error status + short page ---
+    # --- HTTP 403/503 — always blocked for non-data HTML responses ---
+    # Rationale: 403/503 are never the content the user wants. Modern block pages
+    # (Reddit, LinkedIn, etc.) serve full SPA shells that exceed 100KB, so
+    # size-based filtering misses them. Even for a legitimate auth error, the
+    # fallback (Web Unlocker) will also get 403 and we correctly report failure.
+    # False positives are cheap — the fallback mechanism rescues them.
+    if status_code in (403, 503) and not _looks_like_data(html):
+        if html_len < _EMPTY_CONTENT_THRESHOLD:
+            return True, f"HTTP {status_code} with near-empty response ({html_len} bytes)"
+        # For large pages, strip scripts/styles to find block text in the
+        # actual content (Reddit hides it under 180KB of inline CSS).
+        # Check tier 2 patterns regardless of page size.
+        if html_len > _TIER2_MAX_SIZE:
+            _stripped = _SCRIPT_BLOCK_RE.sub('', html[:500000])
+            _stripped = _STYLE_TAG_RE.sub('', _stripped)
+            _check_snippet = _stripped[:30000]
+        else:
+            _check_snippet = snippet
+        for pattern, reason in _TIER2_PATTERNS:
+            if pattern.search(_check_snippet):
+                return True, f"{reason} (HTTP {status_code}, {html_len} bytes)"
+        # Even without a pattern match, a non-data 403/503 HTML page is
+        # almost certainly a block. Flag it so the fallback gets a chance.
+        return True, f"HTTP {status_code} with HTML content ({html_len} bytes)"
+
+    # --- Tier 2 patterns on other 4xx/5xx + short page ---
     if status_code and status_code >= 400 and html_len < _TIER2_MAX_SIZE:
         for pattern, reason in _TIER2_PATTERNS:
             if pattern.search(snippet):

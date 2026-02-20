@@ -78,7 +78,7 @@ check("Cloudflare Just a moment",
 
 check("Cloudflare Checking your browser (short 503)",
     is_blocked(503, '<html><body>Checking your browser before accessing the site.</body></html>'),
-    True, "Cloudflare browser check")
+    True, "503")
 
 # --- PerimeterX ---
 check("PerimeterX block page",
@@ -117,6 +117,21 @@ check("Kasada challenge",
     is_blocked(403, '<html><script>KPSDK.scriptStart = KPSDK.now();</script></html>'),
     True, "Kasada")
 
+# --- Reddit / Network Security ---
+check("Reddit blocked by network security (small)",
+    is_blocked(403, '<html><body>You\'ve been blocked by network security.</body></html>'),
+    True, "Network security block")
+
+check("Reddit blocked by network security (190KB SPA shell)",
+    is_blocked(403, '<html><body><style>' + 'x' * 180000 + '</style>' +
+        'You\'ve been blocked by network security. Log in to continue.</body></html>'),
+    True, "Network security block")
+
+check("Network security block on HTTP 200 (buried in large page)",
+    is_blocked(200, '<html><body><style>' + 'a:b;' * 30000 + '</style>' +
+        '<p>blocked by network security</p></body></html>'),
+    True, "Network security block")
+
 # --- HTTP 429 ---
 check("HTTP 429 rate limit",
     is_blocked(429, '<html><body>Rate limit exceeded</body></html>'),
@@ -148,7 +163,7 @@ print("\n=== TRUE NEGATIVES (must NOT detect as blocked) ===\n")
 
 # --- Normal pages ---
 check("Normal 200 page (example.com size)",
-    is_blocked(200, '<html><head><title>Example</title></head><body>' + 'x' * 500 + '</body></html>'),
+    is_blocked(200, '<html><head><title>Example</title></head><body><p>' + 'x' * 500 + '</p></body></html>'),
     False)
 
 check("Normal 200 large page",
@@ -201,7 +216,10 @@ check("Signup page with hCaptcha (large page)",
         '</body></html>'),
     False)
 
-# --- Legitimate 403 pages (not anti-bot) ---
+# --- 403 pages — ALL non-data 403 HTML is now treated as blocked ---
+# Rationale: 403 is never the content the user wants. Even for legitimate
+# auth errors (Apache/Nginx), the fallback will also get 403 and we report
+# failure correctly. False positives are cheap; false negatives are catastrophic.
 check("Apache directory listing denied (403, large-ish)",
     is_blocked(403, '<html><head><title>403 Forbidden</title></head><body>' +
         '<h1>Forbidden</h1>' +
@@ -209,7 +227,7 @@ check("Apache directory listing denied (403, large-ish)",
         '<hr><address>Apache/2.4.41 (Ubuntu) Server at example.com Port 80</address>' +
         '<p>' + 'Server info. ' * 500 + '</p>' +
         '</body></html>'),
-    False)
+    True, "403")
 
 check("Nginx 403 (large page)",
     is_blocked(403, '<html><head><title>403 Forbidden</title></head><body>' +
@@ -217,7 +235,7 @@ check("Nginx 403 (large page)",
         '<hr><center>nginx/1.18.0</center>' +
         '<p>' + 'Content. ' * 500 + '</p>' +
         '</body></html>'),
-    False)
+    True, "403")
 
 check("API 403 auth required (JSON)",
     is_blocked(403, '{"error": "Forbidden", "message": "Invalid API key", "code": 403}'),
@@ -234,8 +252,8 @@ check("Cloudflare-served normal page with footer",
     False)
 
 # --- Small but legitimate pages ---
-check("Small valid 200 page (150 bytes)",
-    is_blocked(200, '<html><head><title>OK</title></head><body><p>Your request was processed successfully.</p></body></html>'),
+check("Small valid 200 page (with content element)",
+    is_blocked(200, '<html><head><title>OK</title></head><body><p>Your request was processed successfully. Everything is fine.</p></body></html>'),
     False)
 
 check("Small JSON 200 response",
@@ -243,16 +261,17 @@ check("Small JSON 200 response",
     False)
 
 check("Redirect page 200",
-    is_blocked(200, '<html><head><meta http-equiv="refresh" content="0;url=/dashboard"></head><body>Redirecting...</body></html>'),
+    is_blocked(200, '<html><head><meta http-equiv="refresh" content="0;url=/dashboard"></head><body><p>Redirecting to your dashboard. Please wait while we prepare your personalized experience.</p></body></html>'),
     False)
 
-# --- 503 legitimate server errors ---
-check("Legitimate 503 maintenance (large)",
+# --- 503 pages — ALL non-data 503 HTML is now treated as blocked ---
+# Same rationale as 403: 503 is never desired content. Fallback rescues false positives.
+check("503 maintenance page (treated as blocked)",
     is_blocked(503, '<html><body><h1>Service Temporarily Unavailable</h1>' +
         '<p>We are performing scheduled maintenance. Please try again later.</p>' +
         '<p>' + 'Maintenance info. ' * 500 + '</p>' +
         '</body></html>'),
-    False)
+    True, "503")
 
 # --- 200 with short but real content ---
 check("Short thank you page (200, 120 bytes)",
@@ -267,7 +286,7 @@ print("\n=== EDGE CASES ===\n")
 
 check("None status code + empty html",
     is_blocked(None, ''),
-    False)
+    True, "no <body>")
 
 check("None status code + block content",
     is_blocked(None, '<html><body>Reference #18.2d351ab8.1557333295.a4e16ab</body></html>'),
@@ -281,25 +300,25 @@ check("403 + 4999 bytes (just under threshold)",
     is_blocked(403, '<html><body>Access Denied' + 'x' * 4950 + '</body></html>'),
     True, "Access Denied")
 
-check("403 + 5001 bytes (just over threshold, no tier2 match)",
+check("403 + 5001 bytes (over old threshold, now blocked)",
     is_blocked(403, '<html><body>Some error page' + 'x' * 4960 + '</body></html>'),
-    False)
+    True, "403")
 
 check("403 + 9999 bytes with generic block text",
     is_blocked(403, '<html><body>blocked by security' + 'x' * 9950 + '</body></html>'),
     True, "Blocked by security")
 
-check("403 + 10001 bytes with generic block text (too big for tier2)",
+check("403 + 10001 bytes with generic block text (now detected regardless of size)",
     is_blocked(403, '<html><body>blocked by security' + 'x' * 9970 + '</body></html>'),
-    False)
+    True, "Blocked by security")
 
 check("200 + whitespace-padded but 89 bytes content (above threshold for meaningful)",
     is_blocked(200, ' ' * 10 + 'x' * 89 + ' ' * 10),
     True, "empty")
 
-check("200 + exactly 100 bytes stripped (at threshold)",
+check("200 + exactly 100 bytes stripped (at threshold, no body = structural fail)",
     is_blocked(200, 'x' * 100),
-    False)
+    True, "no <body>")
 
 
 # =========================================================================
