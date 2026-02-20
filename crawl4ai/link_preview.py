@@ -336,9 +336,15 @@ class LinkPreview:
                 
                 updated_internal.append(updated_link)
             else:
-                # Keep original link unchanged
+                # Calculate total_score even without head data, using intrinsic_score
+                link.total_score = calculate_total_score(
+                    intrinsic_score=getattr(link, 'intrinsic_score', None),
+                    contextual_score=None,
+                    score_links_enabled=getattr(config, 'score_links', False),
+                    query_provided=bool(config.link_preview_config.query)
+                )
                 updated_internal.append(link)
-        
+
         # Update external links
         updated_external = []
         for link in original_links.external:
@@ -374,9 +380,15 @@ class LinkPreview:
                 
                 updated_external.append(updated_link)
             else:
-                # Keep original link unchanged
+                # Calculate total_score even without head data, using intrinsic_score
+                link.total_score = calculate_total_score(
+                    intrinsic_score=getattr(link, 'intrinsic_score', None),
+                    contextual_score=None,
+                    score_links_enabled=getattr(config, 'score_links', False),
+                    query_provided=bool(config.link_preview_config.query)
+                )
                 updated_external.append(link)
-        
+
         # Sort links by relevance score if available
         if any(hasattr(link, 'head_data') and link.head_data and 'relevance_score' in link.head_data 
                for link in updated_internal + updated_external):
